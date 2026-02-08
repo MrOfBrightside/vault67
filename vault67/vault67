@@ -322,6 +322,128 @@ EOF
     echo "  2. Run: vault67 refine $ticket_id"
 }
 
+# Get ticket state from ticket.md
+get_ticket_state() {
+    local ticket_file="$1"
+    [ ! -f "$ticket_file" ] && error "Ticket file not found: $ticket_file"
+
+    # Extract state from YAML frontmatter
+    sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^state:' | awk '{print $2}'
+}
+
+# Update ticket state in ticket.md
+update_ticket_state() {
+    local ticket_file="$1"
+    local new_state="$2"
+    local timestamp=$(date -u +"%Y-%m-%d")
+
+    [ ! -f "$ticket_file" ] && error "Ticket file not found: $ticket_file"
+
+    # Update state and updated_at in YAML frontmatter
+    sed -i.bak "s/^state: .*/state: $new_state/" "$ticket_file"
+    sed -i.bak "s/^updated_at: .*/updated_at: $timestamp/" "$ticket_file"
+    rm -f "$ticket_file.bak"
+}
+
+# Implement command - hand off to Gas Town
+cmd_implement() {
+    local ticket_id=""
+    local executor="gastown"
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --executor)
+                executor="$2"
+                shift 2
+                ;;
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                if [ -z "$ticket_id" ]; then
+                    ticket_id="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    [ -z "$ticket_id" ] && error "Ticket ID is required"
+
+    # Ensure ticket directory exists
+    local ticket_dir="$TICKETS_DIR/$ticket_id"
+    [ ! -d "$ticket_dir" ] && error "Ticket not found: $ticket_id"
+
+    local ticket_file="$ticket_dir/ticket.md"
+    local promptpack_file="$ticket_dir/promptpack.md"
+    local runs_file="$ticket_dir/runs.md"
+
+    # Validate required files exist
+    [ ! -f "$ticket_file" ] && error "ticket.md not found for $ticket_id"
+    [ ! -f "$promptpack_file" ] && error "promptpack.md not found for $ticket_id (run refine first)"
+
+    # Check current state
+    local current_state=$(get_ticket_state "$ticket_file")
+    info "Current state: $current_state"
+
+    # Guard: require READY_TO_IMPLEMENT
+    if [ "$current_state" != "READY_TO_IMPLEMENT" ]; then
+        error "Ticket must be in READY_TO_IMPLEMENT state (current: $current_state)"
+    fi
+
+    # Update state to IMPLEMENTING
+    info "Updating state to IMPLEMENTING..."
+    update_ticket_state "$ticket_file" "IMPLEMENTING"
+    success "State updated to IMPLEMENTING"
+
+    # Hand off to Gas Town
+    info "Handing off to Gas Town ($executor)..."
+    echo ""
+
+    # For now, we'll create a bead and sling it to a polecat
+    # The promptpack.md will be used as the work description
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Extract title from ticket.md
+    local title=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^title:' | sed 's/^title: //')
+
+    # Create a handoff description
+    local handoff_desc="Implement: $title ($ticket_id)"
+
+    info "Creating implementation bead..."
+    info "Title: $handoff_desc"
+    info "Promptpack: $promptpack_file"
+
+    # Append run entry to runs.md
+    cat >> "$runs_file" <<EOF
+
+---
+## Run: $timestamp
+- Action: implement
+- Executor: $executor
+- State transition: READY_TO_IMPLEMENT → IMPLEMENTING
+- Promptpack: $promptpack_file
+- Status: Handed off to Gas Town
+- Notes: Awaiting implementation completion
+
+EOF
+
+    success "Run logged to runs.md"
+    echo ""
+    warn "Next steps:"
+    echo "  1. Manually hand off to Gas Town using:"
+    echo "     gt sling --assign <polecat> --work '$handoff_desc'"
+    echo ""
+    echo "  2. Provide the polecat with the promptpack:"
+    echo "     cat $promptpack_file"
+    echo ""
+    echo "  3. After completion, update ticket state to IMPLEMENTED or FAILED"
+}
+
 # Main command dispatcher
 main() {
     if [ $# -eq 0 ]; then
@@ -355,7 +477,10 @@ EOF
         create)
             cmd_create "$@"
             ;;
-        refine|answer|implement)
+        implement)
+            cmd_implement "$@"
+            ;;
+        refine|answer)
             error "Command '$cmd' not yet implemented"
             ;;
         *)
