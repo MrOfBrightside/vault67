@@ -345,6 +345,498 @@ update_ticket_state() {
     rm -f "$ticket_file.bak"
 }
 
+# Bump spec version in ticket.md
+bump_spec_version() {
+    local ticket_file="$1"
+    [ ! -f "$ticket_file" ] && error "Ticket file not found: $ticket_file"
+
+    # Extract current version
+    local current_version=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^spec_version:' | awk '{print $2}')
+    local new_version=$((current_version + 1))
+
+    # Update spec_version
+    sed -i.bak "s/^spec_version: .*/spec_version: $new_version/" "$ticket_file"
+    rm -f "$ticket_file.bak"
+
+    echo "$new_version"
+}
+
+# Judge Agent - Evaluates Definition of Ready
+judge_agent() {
+    local spec_file="$1"
+    local questions_file="$2"
+
+    [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+
+    info "Running Judge Agent (Gatekeeper)..."
+
+    local all_criteria_met=true
+    local blocking_questions_exist=false
+    local dor_results=()
+
+    # Extract content from spec.md
+    local spec_content=$(cat "$spec_file")
+
+    # Check 1: Scope in/out defined
+    local has_scope=false
+    if echo "$spec_content" | grep -A 3 "### In scope" | grep -q -e "^-[[:space:]]*[[:alnum:]]" && \
+       echo "$spec_content" | grep -A 3 "### Out of scope" | grep -q -e "^-[[:space:]]*[[:alnum:]]"; then
+        has_scope=true
+        dor_results+=("[x] Scope in/out defined")
+    else
+        has_scope=false
+        all_criteria_met=false
+        dor_results+=("[ ] Scope in/out defined")
+    fi
+
+    # Check 2: Gherkin scenarios present and testable
+    local has_gherkin=false
+    if echo "$spec_content" | grep -A 10 "## Acceptance Criteria (Gherkin)" | grep -q "Feature:\s\+\w" && \
+       echo "$spec_content" | grep -A 10 "## Acceptance Criteria (Gherkin)" | grep -q "Scenario:\s\+\w" && \
+       echo "$spec_content" | grep -A 10 "## Acceptance Criteria (Gherkin)" | grep -q "Given\s\+\w" && \
+       echo "$spec_content" | grep -A 10 "## Acceptance Criteria (Gherkin)" | grep -q "When\s\+\w" && \
+       echo "$spec_content" | grep -A 10 "## Acceptance Criteria (Gherkin)" | grep -q "Then\s\+\w"; then
+        has_gherkin=true
+        dor_results+=("[x] Gherkin scenarios are present and testable")
+    else
+        has_gherkin=false
+        all_criteria_met=false
+        dor_results+=("[ ] Gherkin scenarios are present and testable")
+    fi
+
+    # Check 3: Architecture alignment reviewed and constraints captured
+    local has_architecture=false
+    if echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Relevant modules:[[:space:]]*[[:alnum:]]" || \
+       echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Constraints:[[:space:]]*[[:alnum:]]"; then
+        has_architecture=true
+        dor_results+=("[x] Architecture alignment reviewed and constraints captured")
+    else
+        has_architecture=false
+        all_criteria_met=false
+        dor_results+=("[ ] Architecture alignment reviewed and constraints captured")
+    fi
+
+    # Check 4: Security/compliance reviewed and constraints captured
+    local has_security=false
+    if echo "$spec_content" | grep -A 10 "## Security and compliance" | grep -q -e "- [[:alnum:]]*:[[:space:]]*[[:alnum:]]" || \
+       echo "$spec_content" | grep -A 10 "## Security and compliance" | grep -q -E "N/A|not applicable"; then
+        has_security=true
+        dor_results+=("[x] Security/compliance reviewed and constraints captured")
+    else
+        has_security=false
+        all_criteria_met=false
+        dor_results+=("[ ] Security/compliance reviewed and constraints captured")
+    fi
+
+    # Check 5: Test strategy defined for each scenario
+    local has_test_strategy=false
+    if echo "$spec_content" | grep -A 10 "## Test strategy" | grep -q -e "- Golden build command:[[:space:]]*[[:alnum:]]" && \
+       echo "$spec_content" | grep -A 10 "## Test strategy" | grep -q -e "- Golden test command:[[:space:]]*[[:alnum:]]"; then
+        has_test_strategy=true
+        dor_results+=("[x] Test strategy defined for each scenario")
+    else
+        has_test_strategy=false
+        all_criteria_met=false
+        dor_results+=("[ ] Test strategy defined for each scenario")
+    fi
+
+    # Check 6: Repo golden commands known or explicitly blocked
+    local has_golden_commands=false
+    if echo "$spec_content" | grep -A 10 "## Test strategy" | grep -q -e "- Golden build command:[[:space:]]*[[:alnum:]]" && \
+       echo "$spec_content" | grep -A 10 "## Test strategy" | grep -q -e "- Golden test command:[[:space:]]*[[:alnum:]]"; then
+        has_golden_commands=true
+        dor_results+=("[x] Repo golden commands known or explicitly blocked")
+    else
+        has_golden_commands=false
+        all_criteria_met=false
+        dor_results+=("[ ] Repo golden commands known or explicitly blocked")
+    fi
+
+    # Check 7: Allowed/forbidden paths set
+    local has_paths=false
+    if echo "$spec_content" | grep -A 5 "## Architecture alignment" | grep -q -e "- Allowed paths:[[:space:]]*[[:alnum:]]" || \
+       echo "$spec_content" | grep -A 5 "## Architecture alignment" | grep -q -e "- Forbidden paths:[[:space:]]*[[:alnum:]]"; then
+        has_paths=true
+        dor_results+=("[x] Allowed/forbidden paths set")
+    else
+        has_paths=false
+        all_criteria_met=false
+        dor_results+=("[ ] Allowed/forbidden paths set")
+    fi
+
+    # Check 8: No blocking questions remain
+    local has_no_blocking_questions=true
+    if [ -f "$questions_file" ]; then
+        # Extract blocking questions section
+        local questions_section=$(sed -n '/## Blocking questions/,/## Notes/p' "$questions_file")
+
+        # Check if there are actual questions with content (not just template placeholders)
+        # Look for lines like "1) Question: something" or "Question: something" where something is not empty
+        if echo "$questions_section" | grep -E "^\s*[0-9]+\)\s+Question:\s*.+$" > /dev/null; then
+            # There are questions with content - check if they have answers
+            if echo "$questions_section" | grep -E "Answer:\s*$" > /dev/null; then
+                # Questions exist but some answers are empty
+                has_no_blocking_questions=false
+                blocking_questions_exist=true
+                all_criteria_met=false
+                dor_results+=("[ ] No blocking questions remain")
+            else
+                # All questions have answers
+                dor_results+=("[x] No blocking questions remain")
+            fi
+        else
+            # No real questions (just template), consider it as no blocking questions
+            dor_results+=("[x] No blocking questions remain")
+        fi
+    else
+        dor_results+=("[x] No blocking questions remain")
+    fi
+
+    # Update Definition of Ready checklist in spec.md
+    local temp_file=$(mktemp)
+    local in_dor_section=false
+    local dor_index=0
+
+    while IFS= read -r line; do
+        if [[ "$line" == "## Definition of Ready" ]]; then
+            in_dor_section=true
+            echo "$line" >> "$temp_file"
+        elif [[ "$in_dor_section" == true && "$line" =~ ^\-[[:space:]]\[[[:space:]]\] ]]; then
+            if [ $dor_index -lt ${#dor_results[@]} ]; then
+                echo "- ${dor_results[$dor_index]}" >> "$temp_file"
+                dor_index=$((dor_index + 1))
+            else
+                echo "$line" >> "$temp_file"
+            fi
+        else
+            if [[ "$in_dor_section" == true && ! "$line" =~ ^\-[[:space:]]\[ ]]; then
+                in_dor_section=false
+            fi
+            echo "$line" >> "$temp_file"
+        fi
+    done < "$spec_file"
+
+    mv "$temp_file" "$spec_file"
+
+    # Print evaluation results
+    echo ""
+    info "Definition of Ready Evaluation:"
+    for result in "${dor_results[@]}"; do
+        if [[ "$result" == "[x]"* ]]; then
+            echo -e "  ${GREEN}✓${NC} ${result#[x] }"
+        else
+            echo -e "  ${RED}✗${NC} ${result#[ ] }"
+        fi
+    done
+    echo ""
+
+    # Return status
+    if [ "$blocking_questions_exist" = true ]; then
+        warn "Blocking questions exist - ticket needs information"
+        return 2  # NEEDS_INFO
+    elif [ "$all_criteria_met" = true ]; then
+        success "All Definition of Ready criteria met"
+        return 0  # READY_TO_IMPLEMENT
+    else
+        warn "Not all criteria met - ticket not ready"
+        return 1  # Not ready
+    fi
+}
+
+# Generate promptpack.md from spec.md
+generate_promptpack() {
+    local spec_file="$1"
+    local ticket_file="$2"
+    local promptpack_file="$3"
+
+    [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+    [ ! -f "$ticket_file" ] && error "ticket.md not found: $ticket_file"
+
+    info "Generating promptpack.md..."
+
+    # Extract values from ticket.md
+    local base_ref=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^base_ref:' | awk '{print $2}')
+
+    # Extract sections from spec.md
+    local context=$(sed -n '/^## Context$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local goal=$(sed -n '/^## Goal$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local scope_in=$(sed -n '/^### In scope$/,/^###/p' "$spec_file" | sed '1d;$d')
+    local scope_out=$(sed -n '/^### Out of scope$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local gherkin=$(sed -n '/^## Acceptance Criteria (Gherkin)$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local architecture=$(sed -n '/^## Architecture alignment$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local security=$(sed -n '/^## Security and compliance$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local test_strategy=$(sed -n '/^## Test strategy$/,/^##/p' "$spec_file" | sed '1d;$d')
+
+    # Extract golden commands
+    local golden_build=$(echo "$test_strategy" | grep "- Golden build command:" | sed 's/- Golden build command:\s*//')
+    local golden_test=$(echo "$test_strategy" | grep "- Golden test command:" | sed 's/- Golden test command:\s*//')
+
+    # Write promptpack.md
+    cat > "$promptpack_file" <<EOF
+# Implementation Prompt Pack (for Gas Town)
+
+## Objective
+$goal
+
+## Context
+$context
+
+## Scope
+### In scope
+$scope_in
+
+### Out of scope
+$scope_out
+
+## Acceptance criteria (Gherkin, must satisfy)
+$gherkin
+
+## Constraints and guardrails
+### Architecture alignment
+$architecture
+
+### Security/compliance constraints
+$security
+
+## Repo instructions
+### Base ref
+- $base_ref
+
+### How to build (golden command)
+$golden_build
+
+### How to test (golden command)
+$golden_test
+
+## Test strategy
+$test_strategy
+
+## Verification checklist
+- [ ] All tests pass using golden commands
+- [ ] Acceptance criteria satisfied
+- [ ] No out-of-scope changes
+- [ ] Required docs updated (if applicable)
+
+## Expected output
+- Create a PR against base ref
+- Include a brief PR description mapping changes to scenarios
+- Include test results summary
+EOF
+
+    success "Generated promptpack.md"
+}
+
+# Refine command - run multi-agent refinement pipeline
+cmd_refine() {
+    local ticket_id=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                if [ -z "$ticket_id" ]; then
+                    ticket_id="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    [ -z "$ticket_id" ] && error "Ticket ID is required"
+
+    # Ensure ticket directory exists
+    local ticket_dir="$TICKETS_DIR/$ticket_id"
+    [ ! -d "$ticket_dir" ] && error "Ticket not found: $ticket_id"
+
+    local ticket_file="$ticket_dir/ticket.md"
+    local spec_file="$ticket_dir/spec.md"
+    local questions_file="$ticket_dir/questions.md"
+    local promptpack_file="$ticket_dir/promptpack.md"
+    local runs_file="$ticket_dir/runs.md"
+
+    # Validate required files exist
+    [ ! -f "$ticket_file" ] && error "ticket.md not found for $ticket_id"
+    [ ! -f "$spec_file" ] && error "spec.md not found for $ticket_id"
+
+    # Get current state
+    local current_state=$(get_ticket_state "$ticket_file")
+    info "Current state: $current_state"
+
+    # Update state to REFINING
+    info "Starting refinement pipeline..."
+    update_ticket_state "$ticket_file" "REFINING"
+    success "State updated to REFINING"
+    echo ""
+
+    # Run agents in pipeline order
+    # TODO: Add BA Translator, Architecture, Security, and Engineering Principles agents when ready
+
+    # Run Test Strategy Agent
+    local agents_dir="$SCRIPT_DIR/agents"
+    if [ -f "$agents_dir/test_strategy.sh" ]; then
+        info "Running Test Strategy Agent..."
+        if "$agents_dir/test_strategy.sh" "$ticket_dir" 2>&1; then
+            success "Test Strategy Agent completed"
+        else
+            warn "Test Strategy Agent reported issues (continuing to Judge)"
+        fi
+        echo ""
+    fi
+
+    # Run Judge Agent
+    judge_agent "$spec_file" "$questions_file"
+    local judge_result=$?
+
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local new_state=""
+    local next_steps=""
+
+    if [ $judge_result -eq 2 ]; then
+        # NEEDS_INFO - blocking questions exist
+        new_state="NEEDS_INFO"
+        update_ticket_state "$ticket_file" "$new_state"
+
+        warn "Ticket requires human input"
+        echo ""
+        info "Next steps:"
+        echo "  1. Review questions in: $questions_file"
+        echo "  2. Add answers to blocking questions"
+        echo "  3. Run: vault67 answer $ticket_id"
+
+        next_steps="Answer blocking questions in questions.md"
+
+    elif [ $judge_result -eq 0 ]; then
+        # READY_TO_IMPLEMENT - all criteria met
+        new_state="READY_TO_IMPLEMENT"
+
+        # Bump spec version
+        local new_version=$(bump_spec_version "$ticket_file")
+        success "Bumped spec_version to $new_version"
+
+        # Generate promptpack.md
+        generate_promptpack "$spec_file" "$ticket_file" "$promptpack_file"
+
+        # Update state
+        update_ticket_state "$ticket_file" "$new_state"
+
+        success "Ticket is ready for implementation!"
+        echo ""
+        info "Next steps:"
+        echo "  1. Review promptpack: $promptpack_file"
+        echo "  2. Run: vault67 implement $ticket_id"
+
+        next_steps="Review promptpack.md and run implement"
+
+    else
+        # Not ready - criteria not met but no blocking questions
+        new_state="REFINING"
+        warn "Criteria not met - ticket requires more work"
+        echo ""
+        info "Next steps:"
+        echo "  1. Review spec.md and fill in missing sections"
+        echo "  2. Run: vault67 refine $ticket_id"
+
+        next_steps="Fill in missing sections in spec.md"
+    fi
+
+    # Log run to runs.md
+    cat >> "$runs_file" <<EOF
+
+---
+## Run: $timestamp
+- Action: refine
+- Judge result: $judge_result
+- State transition: $current_state → $new_state
+- Next steps: $next_steps
+
+EOF
+
+    success "Refinement complete"
+    success "New state: $new_state"
+}
+
+# Answer command - validate questions are answered and re-enable refinement
+cmd_answer() {
+    local ticket_id=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                if [ -z "$ticket_id" ]; then
+                    ticket_id="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    [ -z "$ticket_id" ] && error "Ticket ID is required"
+
+    # Ensure ticket directory exists
+    local ticket_dir="$TICKETS_DIR/$ticket_id"
+    [ ! -d "$ticket_dir" ] && error "Ticket not found: $ticket_id"
+
+    local ticket_file="$ticket_dir/ticket.md"
+    local questions_file="$ticket_dir/questions.md"
+    local runs_file="$ticket_dir/runs.md"
+
+    # Validate required files exist
+    [ ! -f "$ticket_file" ] && error "ticket.md not found for $ticket_id"
+
+    # Check current state
+    local current_state=$(get_ticket_state "$ticket_file")
+    info "Current state: $current_state"
+
+    if [ "$current_state" != "NEEDS_INFO" ]; then
+        warn "Ticket is not in NEEDS_INFO state (current: $current_state)"
+        warn "This command is only needed when blocking questions exist"
+        return 0
+    fi
+
+    # Check if questions have been answered
+    if [ -f "$questions_file" ]; then
+        if grep -A 2 "## Blocking questions" "$questions_file" | grep -q "Answer:\s*$"; then
+            error "Blocking questions still have empty answers in $questions_file"
+        fi
+    fi
+
+    info "Questions appear to be answered"
+
+    # Update state back to NEW to allow refinement
+    update_ticket_state "$ticket_file" "NEW"
+    success "State updated to NEW - ready for refinement"
+
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Log run to runs.md
+    cat >> "$runs_file" <<EOF
+
+---
+## Run: $timestamp
+- Action: answer
+- State transition: NEEDS_INFO → NEW
+- Next steps: Run refine again
+
+EOF
+
+    echo ""
+    info "Next steps:"
+    echo "  1. Run: vault67 refine $ticket_id"
+}
+
 # Implement command - hand off to Gas Town
 cmd_implement() {
     local ticket_id=""
@@ -477,11 +969,14 @@ EOF
         create)
             cmd_create "$@"
             ;;
+        refine)
+            cmd_refine "$@"
+            ;;
+        answer)
+            cmd_answer "$@"
+            ;;
         implement)
             cmd_implement "$@"
-            ;;
-        refine|answer)
-            error "Command '$cmd' not yet implemented"
             ;;
         *)
             error "Unknown command: $cmd"
