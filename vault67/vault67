@@ -626,6 +626,125 @@ EOF
     success "Generated promptpack.md"
 }
 
+# Architecture Compliance Agent - Analyzes architecture alignment
+architecture_compliance_agent() {
+    local ticket_dir="$1"
+    local spec_file="$ticket_dir/spec.md"
+    local repo_context_file="$ticket_dir/repo_context.md"
+
+    [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+    [ ! -f "$repo_context_file" ] && error "repo_context.md not found: $repo_context_file"
+
+    info "Analyzing architecture alignment..."
+
+    # Extract Gherkin scenarios from spec.md
+    local gherkin_section=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
+
+    # Check if Gherkin scenarios exist
+    if ! echo "$gherkin_section" | grep -q "Feature:"; then
+        warn "No Gherkin scenarios found - skipping architecture analysis"
+        return 1
+    fi
+
+    # Extract repo context
+    local repo_context=$(cat "$repo_context_file")
+
+    # Extract current architecture section (if exists)
+    local arch_section=$(sed -n '/## Architecture alignment/,/^## /p' "$spec_file" | sed '$d')
+
+    # Analyze and generate architecture alignment
+    info "Analyzing Gherkin scenarios and repository context..."
+
+    # Parse key information from repo context
+    local repo_path=$(echo "$repo_context" | grep -A 1 "^## Repo" | grep "^- Path/URL:" | sed 's/^- Path\/URL:[[:space:]]*//')
+    local language=$(echo "$repo_context" | grep "^- Language/runtime:" | sed 's/^- Language\/runtime:[[:space:]]*//')
+    local main_components=$(echo "$repo_context" | grep "^- Main components/modules:" | sed 's/^- Main components\/modules:[[:space:]]*//')
+
+    # Extract scenarios to understand scope
+    local scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then")
+
+    # Generate architecture alignment based on analysis
+    local relevant_modules=""
+    local constraints=""
+    local allowed_paths=""
+    local forbidden_paths=""
+
+    # Analyze scenarios to identify affected modules
+    if echo "$scenarios" | grep -qi "api\|endpoint\|route\|request"; then
+        relevant_modules="${relevant_modules}\n  - API layer (routes, controllers, middleware)"
+    fi
+
+    if echo "$scenarios" | grep -qi "database\|data\|persist\|store\|save"; then
+        relevant_modules="${relevant_modules}\n  - Data access layer (repositories, models)"
+    fi
+
+    if echo "$scenarios" | grep -qi "auth\|login\|user\|permission"; then
+        relevant_modules="${relevant_modules}\n  - Authentication/Authorization module"
+    fi
+
+    if echo "$scenarios" | grep -qi "test\|validation\|verify"; then
+        relevant_modules="${relevant_modules}\n  - Testing infrastructure"
+    fi
+
+    # If we couldn't identify specific modules, use generic analysis
+    if [ -z "$relevant_modules" ]; then
+        if [ -n "$main_components" ]; then
+            relevant_modules="\n  - $main_components"
+        else
+            relevant_modules="\n  - Core application modules (to be determined from repo structure)"
+        fi
+    fi
+
+    # Generate constraints based on language and patterns
+    constraints="\n  - Follow existing code organization and naming conventions"
+    if [ -n "$language" ]; then
+        constraints="${constraints}\n  - Maintain ${language} best practices and idioms"
+    fi
+    constraints="${constraints}\n  - Preserve backward compatibility with existing APIs"
+    constraints="${constraints}\n  - Follow repository's architectural patterns"
+
+    # Generate allowed paths based on repo structure
+    if [ -n "$repo_path" ] && [ "$repo_path" != "-" ]; then
+        allowed_paths="\n  - src/ (application source code)"
+        allowed_paths="${allowed_paths}\n  - tests/ (test files corresponding to changes)"
+        allowed_paths="${allowed_paths}\n  - docs/ (documentation updates if needed)"
+    else
+        allowed_paths="\n  - Application source directories as defined in repo structure"
+        allowed_paths="${allowed_paths}\n  - Corresponding test directories"
+    fi
+
+    # Generate forbidden paths (common sensitive areas)
+    forbidden_paths="\n  - .git/ (version control internals)"
+    forbidden_paths="${forbidden_paths}\n  - node_modules/ or vendor/ (dependencies)"
+    forbidden_paths="${forbidden_paths}\n  - config/secrets.* (sensitive configuration)"
+    forbidden_paths="${forbidden_paths}\n  - database/migrations/ (unless explicitly in scope)"
+
+    # Build new architecture section
+    local new_arch_section="## Architecture alignment
+- Relevant modules:${relevant_modules}
+- Constraints:${constraints}
+- Allowed paths:${allowed_paths}
+- Forbidden paths:${forbidden_paths}
+"
+
+    # Update spec.md with new architecture section
+    # Use awk to replace the section
+    awk -v new_section="$new_arch_section" '
+        /^## Architecture alignment/ {
+            print new_section
+            in_section = 1
+            next
+        }
+        /^## / && in_section {
+            in_section = 0
+        }
+        !in_section { print }
+    ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
+
+    success "Architecture alignment section updated"
+    return 0
+}
+
 # Refine command - run multi-agent refinement pipeline
 cmd_refine() {
     local ticket_id=""
@@ -675,7 +794,16 @@ cmd_refine() {
     echo ""
 
     # Run agents in pipeline order
-    # TODO: Add BA Translator, Architecture, Security, and Engineering Principles agents when ready
+    # TODO: Add BA Translator, Security, and Engineering Principles agents when ready
+
+    # Run Architecture Compliance Agent
+    info "Running Architecture Compliance Agent..."
+    if architecture_compliance_agent "$ticket_dir"; then
+        success "Architecture Compliance Agent completed"
+    else
+        warn "Architecture Compliance Agent reported issues (continuing to Judge)"
+    fi
+    echo ""
 
     # Run Test Strategy Agent
     local agents_dir="$SCRIPT_DIR/agents"
