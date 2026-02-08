@@ -1,0 +1,12 @@
+{
+  "type": "rig",
+  "version": 1,
+  "name": "DietistApp",
+  "git_url": "https://github.com/MrOfBrightside/DietistApp.git",
+  "local_repo": "/Users/jesperlindberg/Code/DietistApp",
+  "default_branch": "main",
+  "created_at": "2026-01-26T18:19:10.146856+01:00",
+  "beads": {
+    "prefix": "di"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "rigs": {
+    "DietistApp": {
+      "git_url": "https://github.com/MrOfBrightside/DietistApp.git",
+      "local_repo": "/Users/jesperlindberg/Code/DietistApp",
+      "added_at": "2026-01-26T18:19:13.493798+01:00",
+      "beads": {
+        "repo": "",
+        "prefix": "di"
+      }
+    },
+    "vault67": {
+      "git_url": "https://github.com/MrOfBrightside/vault67.git",
+      "added_at": "2026-02-08T18:41:46.02095+01:00",
+      "beads": {
+        "repo": "",
+        "prefix": "va"
+      }
+    }
+  }
+}

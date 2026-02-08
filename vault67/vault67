@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# vault67 - CLI for multi-agent ticket refinement
+# Usage: vault67 <command> [args]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TICKETS_DIR="$SCRIPT_DIR/tickets"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+error() {
+    echo -e "${RED}Error: $*${NC}" >&2
+    exit 1
+}
+
+success() {
+    echo -e "${GREEN}✓ $*${NC}"
+}
+
+info() {
+    echo -e "${BLUE}→ $*${NC}"
+}
+
+warn() {
+    echo -e "${YELLOW}⚠ $*${NC}"
+}
+
+# Generate next ticket ID
+generate_ticket_id() {
+    local max_id=0
+    if [ -d "$TICKETS_DIR" ]; then
+        for dir in "$TICKETS_DIR"/TCK-*; do
+            if [ -d "$dir" ]; then
+                local id=$(basename "$dir" | sed 's/TCK-//')
+                if [ "$id" -gt "$max_id" ]; then
+                    max_id=$id
+                fi
+            fi
+        done
+    fi
+    printf "TCK-%06d" $((max_id + 1))
+}
+
+# Create ticket command
+cmd_create() {
+    local title=""
+    local repo=""
+    local base_ref="main"
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --title)
+                title="$2"
+                shift 2
+                ;;
+            --repo)
+                repo="$2"
+                shift 2
+                ;;
+            --base-ref)
+                base_ref="$2"
+                shift 2
+                ;;
+            *)
+                error "Unknown option: $1"
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    [ -z "$title" ] && error "--title is required"
+    [ -z "$repo" ] && error "--repo is required"
+
+    # Generate ticket ID
+    local ticket_id=$(generate_ticket_id)
+    local ticket_dir="$TICKETS_DIR/$ticket_id"
+    local timestamp=$(date -u +"%Y-%m-%d")
+
+    info "Creating ticket: $ticket_id"
+    info "Title: $title"
+    info "Repo: $repo"
+    info "Base ref: $base_ref"
+
+    # Create ticket directory
+    mkdir -p "$ticket_dir"
+
+    # Create ticket.md
+    cat > "$ticket_dir/ticket.md" <<EOF
+---
+id: $ticket_id
+title: $title
+state: NEW
+spec_version: 0
+repo: $repo
+base_ref: $base_ref
+executor: gastown
+created_at: $timestamp
+updated_at: $timestamp
+---
+
+# Summary
+<!-- Short description of the work -->
+
+## Links
+- Issue:
+- PR:
+
+## Notes
+-
+EOF
+
+    # Create spec.md
+    cat > "$ticket_dir/spec.md" <<'EOF'
+# Specification
+
+## Context
+Why is this needed? What problem does it solve?
+
+## Goal
+What must be true after implementation?
+
+## Scope
+### In scope
+-
+
+### Out of scope
+-
+
+## Requirements (Raw, BA input)
+-
+
+## Acceptance Criteria (Gherkin)
+Feature: <feature name>
+
+  Scenario: <scenario name>
+    Given
+    When
+    Then
+
+## Architecture alignment
+- Relevant modules:
+- Constraints:
+- Allowed paths:
+- Forbidden paths:
+
+## Security and compliance
+- Data classification:
+- AuthN/AuthZ:
+- Logging/Audit:
+- PII/Secrets:
+- Security constraints:
+
+## Test strategy
+- Golden build command:
+- Golden test command:
+- Scenario to test mapping:
+  - Scenario:
+    - Test type (unit/integration/e2e/manual):
+    - Suggested location (folder/file):
+
+## Engineering principles and DoD additions
+-
+
+## Open questions
+-
+
+## Definition of Done
+- PR created with changes scoped correctly
+- Tests added/updated
+- All required checks green
+- Acceptance criteria satisfied
+- Documentation updated (if needed)
+
+## Definition of Ready
+- [ ] Scope in/out defined
+- [ ] Gherkin scenarios are present and testable
+- [ ] Architecture alignment reviewed and constraints captured
+- [ ] Security/compliance reviewed and constraints captured
+- [ ] Test strategy defined for each scenario
+- [ ] Repo golden commands known or explicitly blocked
+- [ ] Allowed/forbidden paths set
+- [ ] No blocking questions remain
+EOF
+
+    # Create repo_context.md
+    cat > "$ticket_dir/repo_context.md" <<'EOF'
+# Repo Context
+
+## Repo
+- Path/URL:
+- Base ref: main
+- Language/runtime:
+- Main components/modules:
+- Architecture docs:
+- Coding conventions:
+
+## How to build (golden command)
+- Command(s):
+- Notes:
+
+## How to test (golden command)
+- Command(s):
+- Test types present (unit/integration/e2e):
+- Notes:
+
+## CI/CD signals
+- Pipeline file(s):
+- Quality gates (lint, typecheck, etc):
+
+## Relevant code areas
+- Likely folders/modules:
+- Key files (if known):
+
+## Snippets (short)
+> Keep snippets short. Prefer paths and small excerpts.
+- Path:
+  - excerpt:
+EOF
+
+    # Create questions.md
+    cat > "$ticket_dir/questions.md" <<'EOF'
+# Questions (Human in the loop)
+
+State is NEEDS_INFO when this file has unanswered blocking questions.
+
+## Blocking questions
+1) Question:
+   - Answer:
+
+2) Question:
+   - Answer:
+
+## Notes
+-
+EOF
+
+    # Create runs.md
+    cat > "$ticket_dir/runs.md" <<'EOF'
+# Runs
+
+## Latest
+- Timestamp:
+- Action: refine | answer | pack | implement | verify
+- Result:
+- Notes:
+EOF
+
+    # Create promptpack.md
+    cat > "$ticket_dir/promptpack.md" <<'EOF'
+# Implementation Prompt Pack (for Gas Town)
+
+## Objective
+Describe exactly what must be delivered.
+
+## Scope
+### In scope
+-
+
+### Out of scope
+-
+
+## Acceptance criteria (Gherkin, must satisfy)
+Feature: <feature name>
+
+  Scenario: <scenario name>
+    Given
+    When
+    Then
+
+## Constraints and guardrails
+### Allowed paths
+-
+
+### Forbidden paths
+-
+
+### Technical constraints
+-
+
+### Security/compliance constraints
+-
+
+## Repo instructions
+### Base ref
+- main
+
+### How to build (golden command)
+-
+
+### How to test (golden command)
+-
+
+## Execution plan
+1)
+2)
+3)
+
+## Verification checklist
+- [ ] All tests pass using golden commands
+- [ ] Acceptance criteria satisfied
+- [ ] No out-of-scope changes
+- [ ] Required docs updated (if applicable)
+
+## Expected output
+- Create a PR against base ref
+- Include a brief PR description mapping changes to scenarios
+- Include test results summary
+EOF
+
+    success "Created ticket: $ticket_id"
+    success "Location: $ticket_dir"
+    echo ""
+    info "Next steps:"
+    echo "  1. Edit $ticket_dir/spec.md with requirements"
+    echo "  2. Run: vault67 refine $ticket_id"
+}
+
+# Main command dispatcher
+main() {
+    if [ $# -eq 0 ]; then
+        cat <<EOF
+vault67 - CLI for multi-agent ticket refinement
+
+Usage:
+  vault67 create --title "<title>" --repo "<path_or_url>" [--base-ref "main"]
+  vault67 refine <ticket-id>
+  vault67 answer <ticket-id>
+  vault67 implement <ticket-id> [--executor gastown]
+
+Commands:
+  create      Create a new ticket with folder and MD files
+  refine      Run multi-agent refinement pipeline
+  answer      Answer blocking questions (HITL)
+  implement   Hand off to Gas Town for implementation
+
+Examples:
+  vault67 create --title "Add rate limiting" --repo "/repos/my-service"
+  vault67 refine TCK-000001
+  vault67 implement TCK-000001
+EOF
+        exit 0
+    fi
+
+    local cmd=$1
+    shift
+
+    case $cmd in
+        create)
+            cmd_create "$@"
+            ;;
+        refine|answer|implement)
+            error "Command '$cmd' not yet implemented"
+            ;;
+        *)
+            error "Unknown command: $cmd"
+            ;;
+    esac
+}
+
+main "$@"

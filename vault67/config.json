@@ -1,0 +1,11 @@
+{
+  "type": "rig",
+  "version": 1,
+  "name": "vault67",
+  "git_url": "https://github.com/MrOfBrightside/vault67.git",
+  "default_branch": "main",
+  "created_at": "2026-02-08T18:41:42.179547+01:00",
+  "beads": {
+    "prefix": "va"
+  }
+}
