@@ -1244,14 +1244,53 @@ cmd_answer() {
         return 0
     fi
 
-    # Check if questions have been answered
-    if [ -f "$questions_file" ]; then
-        if grep -A 2 "## Blocking questions" "$questions_file" | grep -q "Answer:\s*$"; then
-            error "Blocking questions still have empty answers in $questions_file"
+    # Check if questions.md exists
+    [ ! -f "$questions_file" ] && error "questions.md not found for $ticket_id"
+
+    # Extract blocking questions section and check for unanswered questions
+    local questions_section=$(sed -n '/## Blocking questions/,/## Notes/p' "$questions_file")
+    local unanswered_questions=()
+
+    # Parse questions and check if they have answers
+    # Format: "1) Question: <text>\n   - Answer: <text>"
+    local in_question=false
+    local question_num=""
+    local question_text=""
+    local has_answer=false
+
+    while IFS= read -r line; do
+        # Match question lines like "1) Question: something" or "Question: something"
+        if echo "$line" | grep -qE '^[[:space:]]*[0-9]+\)[[:space:]]+Question:[[:space:]]+.+$'; then
+            # Save previous question if it was unanswered
+            if [ "$in_question" = true ] && [ "$has_answer" = false ] && [ -n "$question_text" ]; then
+                unanswered_questions+=("$question_num: $question_text")
+            fi
+
+            # Start new question
+            in_question=true
+            question_num=$(echo "$line" | sed -E 's/^[[:space:]]*([0-9]+)\).*/\1/')
+            question_text=$(echo "$line" | sed -E 's/^[[:space:]]*[0-9]+\)[[:space:]]+Question:[[:space:]]+//')
+            has_answer=false
+        elif echo "$line" | grep -qE '^[[:space:]]+-[[:space:]]+Answer:[[:space:]]+.+$'; then
+            # Found a non-empty answer
+            has_answer=true
+        elif echo "$line" | grep -qE '^[[:space:]]+-[[:space:]]+Answer:[[:space:]]*$'; then
+            # Found an empty answer
+            has_answer=false
         fi
+    done <<< "$questions_section"
+
+    # Check last question
+    if [ "$in_question" = true ] && [ "$has_answer" = false ] && [ -n "$question_text" ]; then
+        unanswered_questions+=("$question_num: $question_text")
     fi
 
-    info "Questions appear to be answered"
+    # If there are unanswered questions, list them and error
+    if [ ${#unanswered_questions[@]} -gt 0 ]; then
+        error "Blocking questions remain unanswered in $questions_file:"$'\n'"$(printf '  - Question %s\n' "${unanswered_questions[@]}")"
+    fi
+
+    success "All blocking questions have been answered"
 
     # Update state to REFINING
     update_ticket_state "$ticket_file" "REFINING"
