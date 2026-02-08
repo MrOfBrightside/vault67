@@ -8,3 +8,30 @@
 [remote "origin"]
 	url = https://github.com/MrOfBrightside/vault67.git
 	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "polecat/obsidian/va-jmo@mle2d7sz"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/quartz/va-91y@mle2dsz2"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/jasper/va-4k8@mle2e7ur"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/quartz/va-3wr@mle3e83z"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/onyx/va-f9o@mle3emxy"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/opal/va-hcs@mle3f1ki"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/topaz/va-kkk@mle3fght"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/garnet/va-i4x@mle3fvmk"]
+	remote = origin
+	merge = refs/heads/main
+[branch "polecat/ruby/va-v0l@mle3ij5b"]
+	remote = origin
+	merge = refs/heads/main

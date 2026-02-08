@@ -1,1 +1,4 @@
 5f8058dd6f92b3cc12ee1ae093674b57a6507dde 5f8058dd6f92b3cc12ee1ae093674b57a6507dde jesper <jesper@logikfabriken.se> 1770572504 +0100	reset: moving to HEAD
+5f8058dd6f92b3cc12ee1ae093674b57a6507dde 01bd7a8927a96cd0c2f0b6b754f0b7e71c1148f0 jesper <jesper@logikfabriken.se> 1770576320 +0100	checkout: moving from main to temp-merge
+01bd7a8927a96cd0c2f0b6b754f0b7e71c1148f0 5f8058dd6f92b3cc12ee1ae093674b57a6507dde jesper <jesper@logikfabriken.se> 1770576371 +0100	checkout: moving from temp-merge to main
+5f8058dd6f92b3cc12ee1ae093674b57a6507dde 01bd7a8927a96cd0c2f0b6b754f0b7e71c1148f0 jesper <jesper@logikfabriken.se> 1770576371 +0100	merge temp-merge: Fast-forward
