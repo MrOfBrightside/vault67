@@ -1373,19 +1373,20 @@ cmd_implement() {
     info "Handing off to Gas Town ($executor)..."
     echo ""
 
-    # For now, we'll create a bead and sling it to a polecat
-    # The promptpack.md will be used as the work description
+    # Read the promptpack.md - this is the handoff payload for Gas Town
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # Extract title from ticket.md
+    # Extract title and repo from ticket.md
     local title=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^title:' | sed 's/^title: //')
+    local repo=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^repo:' | sed 's/^repo:[[:space:]]*//')
 
-    # Create a handoff description
-    local handoff_desc="Implement: $title ($ticket_id)"
-
-    info "Creating implementation bead..."
-    info "Title: $handoff_desc"
-    info "Promptpack: $promptpack_file"
+    # Display promptpack content
+    info "Promptpack content ($promptpack_file):"
+    echo ""
+    echo "────────────────────────────────────────────────────────────"
+    cat "$promptpack_file"
+    echo "────────────────────────────────────────────────────────────"
+    echo ""
 
     # Append run entry to runs.md
     cat >> "$runs_file" <<EOF
@@ -1396,21 +1397,34 @@ cmd_implement() {
 - Executor: $executor
 - State transition: READY_TO_IMPLEMENT → IMPLEMENTING
 - Promptpack: $promptpack_file
-- Status: Handed off to Gas Town
-- Notes: Awaiting implementation completion
+- Repo: $repo
+- Status: Ready for Gas Town handoff
+- Notes: Awaiting Gas Town assignment
 
 EOF
 
     success "Run logged to runs.md"
+    success "Ticket state updated to IMPLEMENTING"
     echo ""
-    warn "Next steps:"
-    echo "  1. Manually hand off to Gas Town using:"
-    echo "     gt sling --assign <polecat> --work '$handoff_desc'"
+
+    # Provide accurate Gas Town handoff instructions
+    info "📋 Implementation Package Ready"
     echo ""
-    echo "  2. Provide the polecat with the promptpack:"
-    echo "     cat $promptpack_file"
+    echo "The promptpack above contains the complete implementation specification."
+    echo "To hand off this work to Gas Town, you have two options:"
     echo ""
-    echo "  3. After completion, update ticket state to IMPLEMENTED or FAILED"
+    echo "Option 1: Create a bead and sling it to a polecat"
+    echo "  # Create a bead for this ticket (using bd command or Gas Town UI)"
+    echo "  # Then sling it:"
+    echo "  gt sling <bead-id> $executor"
+    echo ""
+    echo "Option 2: Manual handoff"
+    echo "  # Copy the promptpack content above"
+    echo "  # Assign work to a polecat manually with the content"
+    echo ""
+    echo "📍 Promptpack location: $promptpack_file"
+    echo "📍 Repository: $repo"
+    echo "📍 Ticket: $ticket_id"
 }
 
 # Main command dispatcher
