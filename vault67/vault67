@@ -836,19 +836,23 @@ security_compliance_agent() {
 
     security_constraints="${security_constraints}keep dependencies up-to-date and scan for vulnerabilities"
 
-    # Build new security section
-    local new_security_section="## Security and compliance
+    # Update spec.md with new security section
+    # Use a temp file to avoid awk newline issues
+    local temp_section=$(mktemp)
+    cat > "$temp_section" <<EOF
 - Data classification: $data_classification
 - AuthN/AuthZ: $authn_authz
 - Logging/Audit: $logging_audit
 - PII/Secrets: $pii_secrets
-- Security constraints:${security_constraints}
-"
+- Security constraints: $security_constraints
+EOF
 
-    # Update spec.md with new security section
-    awk -v new_section="$new_security_section" '
+    # Use awk to replace the section
+    awk '
         /^## Security and compliance/ {
-            print new_section
+            print
+            print ""
+            system("cat '"$temp_section"'")
             in_section = 1
             next
         }
@@ -857,6 +861,8 @@ security_compliance_agent() {
         }
         !in_section { print }
     ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
+
+    rm -f "$temp_section"
 
     success "Security and compliance section updated"
     return 0
