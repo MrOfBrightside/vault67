@@ -745,6 +745,123 @@ architecture_compliance_agent() {
     return 0
 }
 
+# Security & Compliance Agent - Analyzes security requirements
+security_compliance_agent() {
+    local ticket_dir="$1"
+    local spec_file="$ticket_dir/spec.md"
+    local repo_context_file="$ticket_dir/repo_context.md"
+
+    [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+    [ ! -f "$repo_context_file" ] && error "repo_context.md not found: $repo_context_file"
+
+    info "Analyzing security and compliance requirements..."
+
+    # Extract Gherkin scenarios from spec.md
+    local gherkin_section=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
+
+    # Check if Gherkin scenarios exist
+    if ! echo "$gherkin_section" | grep -q "Feature:"; then
+        warn "No Gherkin scenarios found - skipping security analysis"
+        return 1
+    fi
+
+    # Extract repo context
+    local repo_context=$(cat "$repo_context_file")
+
+    # Extract architecture alignment (helps understand data flows and modules)
+    local arch_section=$(sed -n '/## Architecture alignment/,/^## /p' "$spec_file" | sed '$d')
+
+    # Analyze and generate security requirements
+    info "Analyzing scenarios for security implications..."
+
+    # Extract scenarios to understand data handling and operations
+    local scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then")
+
+    # Generate security requirements based on analysis
+    local data_classification="PUBLIC"
+    local authn_authz="No authentication required (public access)"
+    local logging_audit="Standard application logging"
+    local pii_secrets="No PII or secrets identified"
+    local security_constraints="Follow secure coding practices"
+
+    # Analyze for data classification
+    if echo "$scenarios" | grep -qiE "user|account|profile|personal|password|email|phone|address"; then
+        data_classification="CONFIDENTIAL - Contains user personal data"
+        pii_secrets="Contains PII (personal identifiable information) - must be encrypted at rest and in transit"
+    elif echo "$scenarios" | grep -qiE "payment|card|credit|financial|transaction|bank"; then
+        data_classification="RESTRICTED - Contains sensitive financial data"
+        pii_secrets="Contains PCI-DSS sensitive data - must comply with PCI requirements, encrypt all payment data"
+    elif echo "$scenarios" | grep -qiE "secret|key|token|credential|api.?key"; then
+        data_classification="RESTRICTED - Contains secrets and credentials"
+        pii_secrets="Contains secrets/credentials - must use secure secret management (e.g., vault, encrypted env vars)"
+    elif echo "$scenarios" | grep -qiE "internal|proprietary|business"; then
+        data_classification="INTERNAL - Internal business data"
+    fi
+
+    # Analyze for authentication/authorization
+    if echo "$scenarios" | grep -qiE "login|authenticate|sign.?in|user|account"; then
+        authn_authz="Authentication required - implement secure session management, password hashing (bcrypt/argon2), rate limiting on login attempts"
+        if echo "$scenarios" | grep -qiE "admin|role|permission|access.?control"; then
+            authn_authz="${authn_authz}. Role-based access control (RBAC) required - verify permissions before allowing operations"
+        fi
+    elif echo "$scenarios" | grep -qiE "api|token|bearer"; then
+        authn_authz="API authentication required - use token-based auth (JWT or API keys), validate all requests"
+    elif echo "$scenarios" | grep -qiE "public|guest|anonymous"; then
+        authn_authz="Public access allowed - implement rate limiting to prevent abuse"
+    fi
+
+    # Analyze for logging requirements
+    if echo "$scenarios" | grep -qiE "login|authenticate|access|permission|role|admin"; then
+        logging_audit="Security event logging required - log all authentication attempts (success/failure), authorization decisions, and admin actions. Include timestamp, user ID, IP address, and action performed"
+    elif echo "$scenarios" | grep -qiE "create|update|delete|modify|change"; then
+        logging_audit="Audit logging required - log all data modifications with timestamp, user, and changed fields. Retain logs for compliance period"
+    elif echo "$scenarios" | grep -qiE "payment|transaction|financial"; then
+        logging_audit="Transaction logging required - log all financial operations with full audit trail. Ensure PCI-DSS compliance for log retention"
+    fi
+
+    # Analyze for security constraints
+    security_constraints="Input validation required; use parameterized queries; secure password hashing; "
+
+    if echo "$scenarios" | grep -qiE "api|endpoint|route|request"; then
+        security_constraints="${security_constraints}implement rate limiting and CORS policy; "
+    fi
+
+    if echo "$scenarios" | grep -qiE "password|credential|secret|token"; then
+        security_constraints="${security_constraints}never log or expose secrets; use secure secret management; "
+    fi
+
+    if echo "$scenarios" | grep -qiE "session|cookie|auth"; then
+        security_constraints="${security_constraints}use secure, httpOnly cookies with CSRF protection; "
+    fi
+
+    security_constraints="${security_constraints}keep dependencies up-to-date and scan for vulnerabilities"
+
+    # Build new security section
+    local new_security_section="## Security and compliance
+- Data classification: $data_classification
+- AuthN/AuthZ: $authn_authz
+- Logging/Audit: $logging_audit
+- PII/Secrets: $pii_secrets
+- Security constraints:${security_constraints}
+"
+
+    # Update spec.md with new security section
+    awk -v new_section="$new_security_section" '
+        /^## Security and compliance/ {
+            print new_section
+            in_section = 1
+            next
+        }
+        /^## / && in_section {
+            in_section = 0
+        }
+        !in_section { print }
+    ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
+
+    success "Security and compliance section updated"
+    return 0
+}
+
 # Scan repo and update repo_context.md
 scan_repo() {
     local ticket_dir="$1"
@@ -870,6 +987,57 @@ EOF
 }
 
 # Refine command - run multi-agent refinement pipeline
+cmd_security_agent() {
+    local ticket_id=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -*)
+                error "Unknown option: $1"
+                ;;
+            *)
+                if [ -z "$ticket_id" ]; then
+                    ticket_id="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    [ -z "$ticket_id" ] && error "Ticket ID is required"
+
+    # Ensure ticket directory exists
+    local ticket_dir="$TICKETS_DIR/$ticket_id"
+    [ ! -d "$ticket_dir" ] && error "Ticket not found: $ticket_id"
+
+    local spec_file="$ticket_dir/spec.md"
+    local repo_context_file="$ticket_dir/repo_context.md"
+
+    # Validate required files exist
+    [ ! -f "$spec_file" ] && error "spec.md not found for $ticket_id"
+    [ ! -f "$repo_context_file" ] && error "repo_context.md not found for $ticket_id"
+
+    info "Running Security & Compliance Agent on $ticket_id..."
+    echo ""
+
+    # Run the security compliance agent
+    if security_compliance_agent "$ticket_dir"; then
+        success "Security & Compliance Agent completed successfully"
+        echo ""
+        info "Updated: $spec_file"
+        echo ""
+        info "Next steps:"
+        echo "  - Review the 'Security and compliance' section in spec.md"
+        echo "  - Run: vault67 refine $ticket_id (to run full pipeline)"
+    else
+        error "Security & Compliance Agent failed"
+    fi
+}
+
 cmd_refine() {
     local ticket_id=""
 
@@ -921,7 +1089,7 @@ cmd_refine() {
     scan_repo "$ticket_dir"
 
     # Run agents in pipeline order
-    # TODO: Add BA Translator, Security, and Engineering Principles agents when ready
+    # TODO: Add BA Translator and Engineering Principles agents when ready
 
     # Run Architecture Compliance Agent
     info "Running Architecture Compliance Agent..."
@@ -929,6 +1097,15 @@ cmd_refine() {
         success "Architecture Compliance Agent completed"
     else
         warn "Architecture Compliance Agent reported issues (continuing to Judge)"
+    fi
+    echo ""
+
+    # Run Security & Compliance Agent
+    info "Running Security & Compliance Agent..."
+    if security_compliance_agent "$ticket_dir"; then
+        success "Security & Compliance Agent completed"
+    else
+        warn "Security & Compliance Agent reported issues (continuing to Judge)"
     fi
     echo ""
 
@@ -1070,9 +1247,9 @@ cmd_answer() {
 
     info "Questions appear to be answered"
 
-    # Update state back to NEW to allow refinement
-    update_ticket_state "$ticket_file" "NEW"
-    success "State updated to NEW - ready for refinement"
+    # Update state to REFINING
+    update_ticket_state "$ticket_file" "REFINING"
+    success "State updated to REFINING - ready for refinement pipeline"
 
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -1082,8 +1259,8 @@ cmd_answer() {
 ---
 ## Run: $timestamp
 - Action: answer
-- State transition: NEEDS_INFO → NEW
-- Next steps: Run refine again
+- State transition: NEEDS_INFO → REFINING
+- Next steps: Run refine again to complete pipeline
 
 EOF
 
@@ -1200,18 +1377,21 @@ vault67 - CLI for multi-agent ticket refinement
 Usage:
   vault67 create --title "<title>" --repo "<path_or_url>" [--base-ref "main"]
   vault67 refine <ticket-id>
+  vault67 security_agent <ticket-id>
   vault67 answer <ticket-id>
   vault67 implement <ticket-id> [--executor gastown]
 
 Commands:
-  create      Create a new ticket with folder and MD files
-  refine      Run multi-agent refinement pipeline
-  answer      Answer blocking questions (HITL)
-  implement   Hand off to Gas Town for implementation
+  create          Create a new ticket with folder and MD files
+  refine          Run multi-agent refinement pipeline
+  security_agent  Run only the Security & Compliance Agent
+  answer          Answer blocking questions (HITL)
+  implement       Hand off to Gas Town for implementation
 
 Examples:
   vault67 create --title "Add rate limiting" --repo "/repos/my-service"
   vault67 refine TCK-000001
+  vault67 security_agent TCK-000001
   vault67 implement TCK-000001
 EOF
         exit 0
@@ -1226,6 +1406,9 @@ EOF
             ;;
         refine)
             cmd_refine "$@"
+            ;;
+        security_agent)
+            cmd_security_agent "$@"
             ;;
         answer)
             cmd_answer "$@"
