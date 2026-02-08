@@ -745,6 +745,130 @@ architecture_compliance_agent() {
     return 0
 }
 
+# Scan repo and update repo_context.md
+scan_repo() {
+    local ticket_dir="$1"
+    local ticket_file="$ticket_dir/ticket.md"
+    local repo_context_file="$ticket_dir/repo_context.md"
+
+    [ ! -f "$ticket_file" ] && error "ticket.md not found: $ticket_file"
+
+    info "Scanning repository..."
+
+    # Extract repo path from ticket.md
+    local repo_path=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^repo:' | sed 's/^repo:[[:space:]]*//')
+    local base_ref=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^base_ref:' | sed 's/^base_ref:[[:space:]]*//')
+
+    [ -z "$repo_path" ] && error "No repo path found in ticket.md"
+
+    # Resolve absolute path if it's relative
+    if [[ ! "$repo_path" =~ ^/ ]]; then
+        repo_path="$SCRIPT_DIR/$repo_path"
+    fi
+
+    [ ! -d "$repo_path" ] && error "Repository not found: $repo_path"
+
+    info "Repository: $repo_path"
+    info "Base ref: $base_ref"
+
+    # Detect language/runtime
+    local language=""
+    local build_cmd=""
+    local test_cmd=""
+
+    if [ -f "$repo_path/package.json" ]; then
+        language="JavaScript/TypeScript (Node.js)"
+        build_cmd="npm run build"
+        test_cmd="npm test"
+    elif [ -f "$repo_path/go.mod" ]; then
+        language="Go"
+        build_cmd="go build ./..."
+        test_cmd="go test ./..."
+    elif [ -f "$repo_path/pom.xml" ]; then
+        language="Java (Maven)"
+        build_cmd="mvn compile"
+        test_cmd="mvn test"
+    elif [ -f "$repo_path/build.gradle" ] || [ -f "$repo_path/build.gradle.kts" ]; then
+        language="Java/Kotlin (Gradle)"
+        build_cmd="./gradlew build"
+        test_cmd="./gradlew test"
+    elif [ -f "$repo_path/Cargo.toml" ]; then
+        language="Rust"
+        build_cmd="cargo build"
+        test_cmd="cargo test"
+    elif [ -f "$repo_path/requirements.txt" ] || [ -f "$repo_path/setup.py" ] || [ -f "$repo_path/pyproject.toml" ]; then
+        language="Python"
+        build_cmd="python -m build (or N/A)"
+        test_cmd="pytest"
+    elif [ -f "$repo_path/Makefile" ]; then
+        language="C/C++ or Make-based"
+        build_cmd="make"
+        test_cmd="make test"
+    else
+        language="Unknown (manual detection needed)"
+        build_cmd="UNKNOWN - needs manual specification"
+        test_cmd="UNKNOWN - needs manual specification"
+    fi
+
+    # Get directory structure (top-level folders)
+    local main_components=""
+    if [ -d "$repo_path" ]; then
+        main_components=$(cd "$repo_path" && find . -maxdepth 2 -type d ! -path '*/\.*' ! -path '.' ! -path './node_modules*' ! -path './target*' ! -path './dist*' ! -path './build*' 2>/dev/null | head -20 | sort | sed 's|^\./||' | paste -sd ", " -)
+    fi
+
+    # Detect CI/CD
+    local pipeline_files=""
+    if [ -d "$repo_path/.github/workflows" ]; then
+        pipeline_files=".github/workflows/*"
+    elif [ -f "$repo_path/.gitlab-ci.yml" ]; then
+        pipeline_files=".gitlab-ci.yml"
+    elif [ -f "$repo_path/Jenkinsfile" ]; then
+        pipeline_files="Jenkinsfile"
+    elif [ -f "$repo_path/.circleci/config.yml" ]; then
+        pipeline_files=".circleci/config.yml"
+    fi
+
+    # Update repo_context.md
+    cat > "$repo_context_file" <<EOF
+# Repo Context
+
+## Repo
+- Path/URL: $repo_path
+- Base ref: $base_ref
+- Language/runtime: $language
+- Main components/modules: $main_components
+- Architecture docs: (needs manual review)
+- Coding conventions: (needs manual review)
+
+## How to build (golden command)
+- Command(s): $build_cmd
+- Notes: Auto-detected, verify correctness
+
+## How to test (golden command)
+- Command(s): $test_cmd
+- Test types present (unit/integration/e2e): needs scan
+- Notes: Auto-detected, verify correctness
+
+## CI/CD signals
+- Pipeline file(s): $pipeline_files
+- Quality gates (lint, typecheck, etc): needs review
+
+## Relevant code areas
+- Likely folders/modules: $main_components
+- Key files (if known): (needs analysis based on requirements)
+
+## Snippets (short)
+> Keep snippets short. Prefer paths and small excerpts.
+- Path: (to be added by agents)
+  - excerpt: (to be added by agents)
+EOF
+
+    success "Repository context updated"
+    success "Language detected: $language"
+    info "Review and refine repo_context.md if needed"
+    echo ""
+}
+
 # Refine command - run multi-agent refinement pipeline
 cmd_refine() {
     local ticket_id=""
@@ -792,6 +916,9 @@ cmd_refine() {
     update_ticket_state "$ticket_file" "REFINING"
     success "State updated to REFINING"
     echo ""
+
+    # Scan repo to update repo_context.md
+    scan_repo "$ticket_dir"
 
     # Run agents in pipeline order
     # TODO: Add BA Translator, Security, and Engineering Principles agents when ready
