@@ -6,6 +6,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TICKETS_DIR="$SCRIPT_DIR/tickets"
+CONFIG_FILE="$SCRIPT_DIR/.vault67.conf"
+
+# Codeberg API configuration (loaded from config file or environment)
+CODEBERG_TOKEN="${CODEBERG_TOKEN:-}"
+CODEBERG_API="${CODEBERG_API:-https://codeberg.org/api/v1}"
+CODEBERG_REPO="${CODEBERG_REPO:-Logikfabriken/Vault67}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -31,6 +37,206 @@ warn() {
     echo -e "${YELLOW}⚠ $*${NC}"
 }
 
+# Load configuration from file
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # Source the config file if it exists
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+
+        # Override with environment variables if set
+        CODEBERG_TOKEN="${CODEBERG_TOKEN:-}"
+        CODEBERG_API="${CODEBERG_API:-https://codeberg.org/api/v1}"
+        CODEBERG_REPO="${CODEBERG_REPO:-Logikfabriken/Vault67}"
+    fi
+
+    # Validate token is set
+    if [ -z "$CODEBERG_TOKEN" ]; then
+        error "CODEBERG_TOKEN not set. Please set it in $CONFIG_FILE or as an environment variable."
+    fi
+}
+
+# Extract owner and repo from CODEBERG_REPO
+get_owner_repo() {
+    echo "$CODEBERG_REPO" | sed 's|/| |'
+}
+
+# Codeberg API: Create issue
+# Usage: api_create_issue <title> <body> <labels...>
+api_create_issue() {
+    local title="$1"
+    local body="$2"
+    shift 2
+    local labels=("$@")
+
+    load_config
+
+    local owner_repo=($(get_owner_repo))
+    local owner="${owner_repo[0]}"
+    local repo="${owner_repo[1]}"
+
+    # Build labels JSON array
+    local labels_json="["
+    for label in "${labels[@]}"; do
+        labels_json="${labels_json}\"${label}\","
+    done
+    labels_json="${labels_json%,}]"  # Remove trailing comma and close array
+
+    # Create JSON payload using heredoc to handle multiline body
+    local json_payload=$(python3 -c "import json, sys; print(json.dumps({'title': sys.argv[1], 'body': sys.argv[2]}))" "$title" "$body")
+
+    # Add labels to payload
+    json_payload=$(echo "$json_payload" | python3 -c "import json, sys; data = json.load(sys.stdin); data['labels'] = json.loads(sys.argv[1]); print(json.dumps(data))" "$labels_json")
+
+    # Make API request
+    local response=$(curl -s -X POST \
+        -H "Authorization: token $CODEBERG_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$json_payload" \
+        "$CODEBERG_API/repos/$owner/$repo/issues")
+
+    echo "$response"
+}
+
+# Codeberg API: Get issue
+# Usage: api_get_issue <issue_number>
+api_get_issue() {
+    local issue_number="$1"
+
+    load_config
+
+    local owner_repo=($(get_owner_repo))
+    local owner="${owner_repo[0]}"
+    local repo="${owner_repo[1]}"
+
+    local response=$(curl -s -X GET \
+        -H "Authorization: token $CODEBERG_TOKEN" \
+        -H "Content-Type: application/json" \
+        "$CODEBERG_API/repos/$owner/$repo/issues/$issue_number")
+
+    echo "$response"
+}
+
+# Codeberg API: Update issue
+# Usage: api_update_issue <issue_number> <body>
+api_update_issue() {
+    local issue_number="$1"
+    local body="$2"
+
+    load_config
+
+    local owner_repo=($(get_owner_repo))
+    local owner="${owner_repo[0]}"
+    local repo="${owner_repo[1]}"
+
+    # Create JSON payload
+    local json_payload=$(python3 -c "import json, sys; print(json.dumps({'body': sys.argv[1]}))" "$body")
+
+    # Make API request
+    local response=$(curl -s -X PATCH \
+        -H "Authorization: token $CODEBERG_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$json_payload" \
+        "$CODEBERG_API/repos/$owner/$repo/issues/$issue_number")
+
+    echo "$response"
+}
+
+# Codeberg API: Replace labels on issue
+# Usage: api_replace_labels <issue_number> <label1> <label2> ...
+api_replace_labels() {
+    local issue_number="$1"
+    shift
+    local labels=("$@")
+
+    load_config
+
+    local owner_repo=($(get_owner_repo))
+    local owner="${owner_repo[0]}"
+    local repo="${owner_repo[1]}"
+
+    # Build labels JSON array
+    local labels_json="["
+    for label in "${labels[@]}"; do
+        labels_json="${labels_json}\"${label}\","
+    done
+    labels_json="${labels_json%,}]"  # Remove trailing comma and close array
+
+    # Create JSON payload
+    local json_payload=$(python3 -c "import json, sys; print(json.dumps({'labels': json.loads(sys.argv[1])}))" "$labels_json")
+
+    # Make API request to replace labels
+    local response=$(curl -s -X PUT \
+        -H "Authorization: token $CODEBERG_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$json_payload" \
+        "$CODEBERG_API/repos/$owner/$repo/issues/$issue_number/labels")
+
+    echo "$response"
+}
+
+# Codeberg API: Add comment to issue
+# Usage: api_add_comment <issue_number> <comment_body>
+api_add_comment() {
+    local issue_number="$1"
+    local comment_body="$2"
+
+    load_config
+
+    local owner_repo=($(get_owner_repo))
+    local owner="${owner_repo[0]}"
+    local repo="${owner_repo[1]}"
+
+    # Create JSON payload
+    local json_payload=$(python3 -c "import json, sys; print(json.dumps({'body': sys.argv[1]}))" "$comment_body")
+
+    # Make API request
+    local response=$(curl -s -X POST \
+        -H "Authorization: token $CODEBERG_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$json_payload" \
+        "$CODEBERG_API/repos/$owner/$repo/issues/$issue_number/comments")
+
+    echo "$response"
+}
+
+# Codeberg API: Get comments for issue
+# Usage: api_get_comments <issue_number>
+api_get_comments() {
+    local issue_number="$1"
+
+    load_config
+
+    local owner_repo=($(get_owner_repo))
+    local owner="${owner_repo[0]}"
+    local repo="${owner_repo[1]}"
+
+    local response=$(curl -s -X GET \
+        -H "Authorization: token $CODEBERG_TOKEN" \
+        -H "Content-Type: application/json" \
+        "$CODEBERG_API/repos/$owner/$repo/issues/$issue_number/comments")
+
+    echo "$response"
+}
+
+# Extract issue state label from issue JSON
+# Usage: get_issue_state_label <issue_json>
+get_issue_state_label() {
+    local issue_json="$1"
+
+    # Extract labels array and find state: label
+    echo "$issue_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+labels = data.get('labels', [])
+for label in labels:
+    name = label.get('name', '')
+    if name.startswith('state:'):
+        print(name)
+        break
+"
+}
+
 # Generate next ticket ID
 generate_ticket_id() {
     local max_id=0
@@ -47,7 +253,7 @@ generate_ticket_id() {
     printf "TCK-%06d" $((max_id + 1))
 }
 
-# Create ticket command
+# Create ticket command (using Codeberg API)
 cmd_create() {
     local title=""
     local repo=""
@@ -78,46 +284,24 @@ cmd_create() {
     [ -z "$title" ] && error "--title is required"
     [ -z "$repo" ] && error "--repo is required"
 
-    # Generate ticket ID
-    local ticket_id=$(generate_ticket_id)
-    local ticket_dir="$TICKETS_DIR/$ticket_id"
     local timestamp=$(date -u +"%Y-%m-%d")
 
-    info "Creating ticket: $ticket_id"
+    info "Creating issue on Codeberg..."
     info "Title: $title"
     info "Repo: $repo"
     info "Base ref: $base_ref"
 
-    # Create ticket directory
-    mkdir -p "$ticket_dir"
+    # Build issue body with spec template (using EOF without quotes to allow variable expansion)
+    local issue_body=$(cat <<EOF
+<!-- Metadata -->
+**Repo:** $repo
+**Base ref:** $base_ref
+**Executor:** gastown
+**Created:** $timestamp
+**Spec version:** 0
 
-    # Create ticket.md
-    cat > "$ticket_dir/ticket.md" <<EOF
----
-id: $ticket_id
-title: $title
-state: NEW
-spec_version: 0
-repo: $repo
-base_ref: $base_ref
-executor: gastown
-created_at: $timestamp
-updated_at: $timestamp
 ---
 
-# Summary
-<!-- Short description of the work -->
-
-## Links
-- Issue:
-- PR:
-
-## Notes
--
-EOF
-
-    # Create spec.md
-    cat > "$ticket_dir/spec.md" <<'EOF'
 # Specification
 
 ## Context
@@ -187,139 +371,57 @@ Feature: <feature name>
 - [ ] Repo golden commands known or explicitly blocked
 - [ ] Allowed/forbidden paths set
 - [ ] No blocking questions remain
-EOF
 
-    # Create repo_context.md
-    cat > "$ticket_dir/repo_context.md" <<'EOF'
-# Repo Context
+---
 
-## Repo
-- Path/URL:
-- Base ref: main
-- Language/runtime:
-- Main components/modules:
-- Architecture docs:
-- Coding conventions:
+## Repo Context
 
-## How to build (golden command)
-- Command(s):
-- Notes:
-
-## How to test (golden command)
-- Command(s):
-- Test types present (unit/integration/e2e):
-- Notes:
-
-## CI/CD signals
-- Pipeline file(s):
-- Quality gates (lint, typecheck, etc):
-
-## Relevant code areas
-- Likely folders/modules:
-- Key files (if known):
-
-## Snippets (short)
-> Keep snippets short. Prefer paths and small excerpts.
-- Path:
-  - excerpt:
-EOF
-
-    # Create questions.md
-    cat > "$ticket_dir/questions.md" <<'EOF'
-# Questions (Human in the loop)
-
-State is NEEDS_INFO when this file has unanswered blocking questions.
-
-## Blocking questions
-1) Question:
-   - Answer:
-
-2) Question:
-   - Answer:
-
-## Notes
--
-EOF
-
-    # Create runs.md
-    cat > "$ticket_dir/runs.md" <<'EOF'
-# Runs
-
-## Latest
-- Timestamp:
-- Action: refine | answer | pack | implement | verify
-- Result:
-- Notes:
-EOF
-
-    # Create promptpack.md
-    cat > "$ticket_dir/promptpack.md" <<'EOF'
-# Implementation Prompt Pack (for Gas Town)
-
-## Objective
-Describe exactly what must be delivered.
-
-## Scope
-### In scope
--
-
-### Out of scope
--
-
-## Acceptance criteria (Gherkin, must satisfy)
-Feature: <feature name>
-
-  Scenario: <scenario name>
-    Given
-    When
-    Then
-
-## Constraints and guardrails
-### Allowed paths
--
-
-### Forbidden paths
--
-
-### Technical constraints
--
-
-### Security/compliance constraints
--
-
-## Repo instructions
-### Base ref
-- main
+### Repo
+- Path/URL: $repo
+- Base ref: $base_ref
+- Language/runtime: (to be detected)
+- Main components/modules: (to be scanned)
+- Architecture docs: (needs manual review)
+- Coding conventions: (needs manual review)
 
 ### How to build (golden command)
--
+- Command(s): (to be detected)
+- Notes: Will be auto-detected during refinement
 
 ### How to test (golden command)
--
+- Command(s): (to be detected)
+- Test types present: (to be scanned)
+- Notes: Will be auto-detected during refinement
 
-## Execution plan
-1)
-2)
-3)
+### CI/CD signals
+- Pipeline file(s): (to be detected)
+- Quality gates: (needs review)
 
-## Verification checklist
-- [ ] All tests pass using golden commands
-- [ ] Acceptance criteria satisfied
-- [ ] No out-of-scope changes
-- [ ] Required docs updated (if applicable)
-
-## Expected output
-- Create a PR against base ref
-- Include a brief PR description mapping changes to scenarios
-- Include test results summary
+### Relevant code areas
+- Likely folders/modules: (to be analyzed)
+- Key files: (to be determined)
 EOF
+)
 
-    success "Created ticket: $ticket_id"
-    success "Location: $ticket_dir"
+    # Create issue via Codeberg API
+    info "Calling Codeberg API to create issue..."
+    local response=$(api_create_issue "$title" "$issue_body" "state:NEW")
+
+    # Extract issue number and URL from response
+    local issue_number=$(echo "$response" | python3 -c "import json, sys; print(json.load(sys.stdin).get('number', ''))")
+    local issue_url=$(echo "$response" | python3 -c "import json, sys; print(json.load(sys.stdin).get('html_url', ''))")
+
+    # Check if creation was successful
+    if [ -z "$issue_number" ] || [ "$issue_number" == "" ]; then
+        error "Failed to create issue. API response: $response"
+    fi
+
+    success "Created issue #$issue_number"
+    success "URL: $issue_url"
     echo ""
     info "Next steps:"
-    echo "  1. Edit $ticket_dir/spec.md with requirements"
-    echo "  2. Run: vault67 refine $ticket_id"
+    echo "  1. Edit the issue body on Codeberg to add requirements"
+    echo "  2. Run: vault67 refine $issue_number"
 }
 
 # Get ticket state from ticket.md
@@ -1045,7 +1147,7 @@ cmd_security_agent() {
 }
 
 cmd_refine() {
-    local ticket_id=""
+    local issue_number=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -1054,8 +1156,8 @@ cmd_refine() {
                 error "Unknown option: $1"
                 ;;
             *)
-                if [ -z "$ticket_id" ]; then
-                    ticket_id="$1"
+                if [ -z "$issue_number" ]; then
+                    issue_number="$1"
                     shift
                 else
                     error "Unexpected argument: $1"
@@ -1065,143 +1167,144 @@ cmd_refine() {
     done
 
     # Validate required arguments
-    [ -z "$ticket_id" ] && error "Ticket ID is required"
+    [ -z "$issue_number" ] && error "Issue number is required"
 
-    # Ensure ticket directory exists
-    local ticket_dir="$TICKETS_DIR/$ticket_id"
-    [ ! -d "$ticket_dir" ] && error "Ticket not found: $ticket_id"
+    info "Fetching issue #$issue_number from Codeberg..."
 
-    local ticket_file="$ticket_dir/ticket.md"
-    local spec_file="$ticket_dir/spec.md"
-    local questions_file="$ticket_dir/questions.md"
-    local promptpack_file="$ticket_dir/promptpack.md"
-    local runs_file="$ticket_dir/runs.md"
+    # GET issue
+    local issue_json=$(api_get_issue "$issue_number")
 
-    # Validate required files exist
-    [ ! -f "$ticket_file" ] && error "ticket.md not found for $ticket_id"
-    [ ! -f "$spec_file" ] && error "spec.md not found for $ticket_id"
+    # Check if issue exists
+    local issue_title=$(echo "$issue_json" | python3 -c "import json, sys; print(json.load(sys.stdin).get('title', ''))" 2>/dev/null)
+    if [ -z "$issue_title" ]; then
+        error "Issue #$issue_number not found or API error"
+    fi
 
-    # Get current state
-    local current_state=$(get_ticket_state "$ticket_file")
-    info "Current state: $current_state"
+    local issue_body=$(echo "$issue_json" | python3 -c "import json, sys; print(json.load(sys.stdin).get('body', ''))")
+    local issue_url=$(echo "$issue_json" | python3 -c "import json, sys; print(json.load(sys.stdin).get('html_url', ''))")
 
-    # Update state to REFINING
+    # Extract current state label
+    local current_label=$(get_issue_state_label "$issue_json")
+    info "Current state: $current_label"
+
+    # Verify state allows refinement
+    if [[ ! "$current_label" =~ ^state:(NEW|REFINING|NEEDS_INFO)$ ]]; then
+        error "Issue cannot be refined in current state: $current_label (expected NEW, REFINING, or NEEDS_INFO)"
+    fi
+
+    # Update label to REFINING
     info "Starting refinement pipeline..."
-    update_ticket_state "$ticket_file" "REFINING"
-    success "State updated to REFINING"
+    api_replace_labels "$issue_number" "state:REFINING"
+    success "State updated to state:REFINING"
     echo ""
 
-    # Scan repo to update repo_context.md
-    scan_repo "$ticket_dir"
+    # TODO: Agent integration
+    # The agents (Architecture Compliance, Security & Compliance, Test Strategy, Judge)
+    # need to be integrated to work with issue body instead of local files.
+    # For now, this is a simplified version that demonstrates the API integration pattern.
 
-    # Run agents in pipeline order
-    # TODO: Add BA Translator and Engineering Principles agents when ready
-
-    # Run Architecture Compliance Agent
-    info "Running Architecture Compliance Agent..."
-    if architecture_compliance_agent "$ticket_dir"; then
-        success "Architecture Compliance Agent completed"
-    else
-        warn "Architecture Compliance Agent reported issues (continuing to Judge)"
-    fi
+    warn "NOTE: Full agent pipeline integration is pending"
+    warn "This version performs basic validation and state transitions"
     echo ""
 
-    # Run Security & Compliance Agent
-    info "Running Security & Compliance Agent..."
-    if security_compliance_agent "$ticket_dir"; then
-        success "Security & Compliance Agent completed"
-    else
-        warn "Security & Compliance Agent reported issues (continuing to Judge)"
-    fi
-    echo ""
+    # Extract repo path from metadata
+    local repo=$(echo "$issue_body" | grep '^\*\*Repo:\*\*' | sed 's/^\*\*Repo:\*\*[[:space:]]*//')
 
-    # Run Test Strategy Agent
-    local agents_dir="$SCRIPT_DIR/agents"
-    if [ -f "$agents_dir/test_strategy.sh" ]; then
-        info "Running Test Strategy Agent..."
-        if "$agents_dir/test_strategy.sh" "$ticket_dir" 2>&1; then
-            success "Test Strategy Agent completed"
-        else
-            warn "Test Strategy Agent reported issues (continuing to Judge)"
-        fi
-        echo ""
-    fi
-
-    # Run Judge Agent
-    judge_agent "$spec_file" "$questions_file"
-    local judge_result=$?
+    # Simple validation: check if key sections are filled
+    local has_context=$(echo "$issue_body" | grep -A 3 "## Context" | grep -v "^## Context" | grep -v "^$" | grep -v "Why is this needed" | wc -l | tr -d ' ')
+    local has_gherkin=$(echo "$issue_body" | grep -A 5 "## Acceptance Criteria (Gherkin)" | grep -E "(Feature:|Scenario:|Given|When|Then)" | wc -l | tr -d ' ')
 
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    local new_state=""
+    local new_label=""
     local next_steps=""
+    local validation_notes=""
 
-    if [ $judge_result -eq 2 ]; then
-        # NEEDS_INFO - blocking questions exist
-        new_state="NEEDS_INFO"
-        update_ticket_state "$ticket_file" "$new_state"
+    # Basic validation
+    if [ "$has_context" -gt 0 ] && [ "$has_gherkin" -gt 3 ]; then
+        # Minimum requirements met
+        new_label="state:READY_TO_IMPLEMENT"
+        next_steps="Review the issue and run: vault67 implement $issue_number"
+        validation_notes="Basic validation passed: Context and Gherkin scenarios present."
 
-        warn "Ticket requires human input"
-        echo ""
-        info "Next steps:"
-        echo "  1. Review questions in: $questions_file"
-        echo "  2. Add answers to blocking questions"
-        echo "  3. Run: vault67 answer $ticket_id"
+        info "Basic validation passed"
+        success "Issue appears ready for implementation"
 
-        next_steps="Answer blocking questions in questions.md"
+        # Generate simplified promptpack as comment
+        local promptpack=$(cat <<EOF
+## Implementation Prompt Pack
 
-    elif [ $judge_result -eq 0 ]; then
-        # READY_TO_IMPLEMENT - all criteria met
-        new_state="READY_TO_IMPLEMENT"
+**Generated:** $timestamp
 
-        # Bump spec version
-        local new_version=$(bump_spec_version "$ticket_file")
-        success "Bumped spec_version to $new_version"
+### Issue
+#$issue_number - $issue_title
+URL: $issue_url
 
-        # Generate promptpack.md
-        generate_promptpack "$spec_file" "$ticket_file" "$promptpack_file"
+### Repository
+$repo
 
-        # Update state
-        update_ticket_state "$ticket_file" "$new_state"
+### Specification
+See issue body above for full specification including:
+- Context and goals
+- Acceptance criteria (Gherkin)
+- Architecture alignment
+- Security requirements
+- Test strategy
 
-        success "Ticket is ready for implementation!"
-        echo ""
-        info "Next steps:"
-        echo "  1. Review promptpack: $promptpack_file"
-        echo "  2. Run: vault67 implement $ticket_id"
+### Next Steps
+1. Review the full issue body
+2. Implement according to acceptance criteria
+3. Create PR against base ref
+4. Ensure all tests pass
+EOF
+)
 
-        next_steps="Review promptpack.md and run implement"
+        info "Generating promptpack..."
+        api_add_comment "$issue_number" "$promptpack"
+        success "Promptpack added as comment"
 
     else
-        # Not ready - criteria not met but no blocking questions
-        new_state="REFINING"
-        warn "Criteria not met - ticket requires more work"
-        echo ""
-        info "Next steps:"
-        echo "  1. Review spec.md and fill in missing sections"
-        echo "  2. Run: vault67 refine $ticket_id"
+        # Requirements not met
+        new_label="state:REFINING"
+        next_steps="Fill in missing sections in the issue body, then run: vault67 refine $issue_number"
+        validation_notes="Validation incomplete: Missing context or Gherkin scenarios. Please edit the issue body to add required information."
 
-        next_steps="Fill in missing sections in spec.md"
+        warn "Validation incomplete"
+        info "Context sections found: $has_context"
+        info "Gherkin keywords found: $has_gherkin (need at least 4: Feature, Scenario, Given, When, Then)"
     fi
 
-    # Log run to runs.md
-    cat >> "$runs_file" <<EOF
+    # Update label based on validation
+    api_replace_labels "$issue_number" "$new_label"
 
----
-## Run: $timestamp
+    # Add run log comment
+    local log_comment=$(cat <<EOF
+**Refinement Run: $timestamp**
+
 - Action: refine
-- Judge result: $judge_result
-- State transition: $current_state → $new_state
+- Previous state: $current_label
+- New state: $new_label
+- Validation: $validation_notes
 - Next steps: $next_steps
 
-EOF
+---
 
+*Note: This is a simplified refinement. Full agent pipeline (Architecture, Security, Test Strategy, Judge) integration is in progress.*
+EOF
+)
+
+    api_add_comment "$issue_number" "$log_comment"
+
+    echo ""
     success "Refinement complete"
-    success "New state: $new_state"
+    success "New state: $new_label"
+    echo ""
+    info "Next steps:"
+    echo "  $next_steps"
 }
 
-# Answer command - validate questions are answered and re-enable refinement
+# Answer command - validate questions are answered and re-enable refinement (using Codeberg API)
 cmd_answer() {
-    local ticket_id=""
+    local issue_number=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -1210,8 +1313,8 @@ cmd_answer() {
                 error "Unknown option: $1"
                 ;;
             *)
-                if [ -z "$ticket_id" ]; then
-                    ticket_id="$1"
+                if [ -z "$issue_number" ]; then
+                    issue_number="$1"
                     shift
                 else
                     error "Unexpected argument: $1"
@@ -1221,102 +1324,72 @@ cmd_answer() {
     done
 
     # Validate required arguments
-    [ -z "$ticket_id" ] && error "Ticket ID is required"
+    [ -z "$issue_number" ] && error "Issue number is required"
 
-    # Ensure ticket directory exists
-    local ticket_dir="$TICKETS_DIR/$ticket_id"
-    [ ! -d "$ticket_dir" ] && error "Ticket not found: $ticket_id"
+    info "Fetching issue #$issue_number from Codeberg..."
 
-    local ticket_file="$ticket_dir/ticket.md"
-    local questions_file="$ticket_dir/questions.md"
-    local runs_file="$ticket_dir/runs.md"
+    # GET issue
+    local issue_json=$(api_get_issue "$issue_number")
 
-    # Validate required files exist
-    [ ! -f "$ticket_file" ] && error "ticket.md not found for $ticket_id"
+    # Check if issue exists
+    local issue_title=$(echo "$issue_json" | python3 -c "import json, sys; print(json.load(sys.stdin).get('title', ''))" 2>/dev/null)
+    if [ -z "$issue_title" ]; then
+        error "Issue #$issue_number not found or API error"
+    fi
 
-    # Check current state
-    local current_state=$(get_ticket_state "$ticket_file")
-    info "Current state: $current_state"
+    # Extract current state label
+    local current_label=$(get_issue_state_label "$issue_json")
+    info "Current state: $current_label"
 
-    if [ "$current_state" != "NEEDS_INFO" ]; then
-        warn "Ticket is not in NEEDS_INFO state (current: $current_state)"
+    # Verify issue is in NEEDS_INFO state
+    if [ "$current_label" != "state:NEEDS_INFO" ]; then
+        warn "Issue is not in state:NEEDS_INFO (current: $current_label)"
         warn "This command is only needed when blocking questions exist"
         return 0
     fi
 
-    # Check if questions.md exists
-    [ ! -f "$questions_file" ] && error "questions.md not found for $ticket_id"
+    # GET comments to check if answers were provided
+    info "Checking comments for answers..."
+    local comments_json=$(api_get_comments "$issue_number")
 
-    # Extract blocking questions section and check for unanswered questions
-    local questions_section=$(sed -n '/## Blocking questions/,/## Notes/p' "$questions_file")
-    local unanswered_questions=()
+    # Check if there are any comments (indicating answers may have been provided)
+    local comment_count=$(echo "$comments_json" | python3 -c "import json, sys; print(len(json.load(sys.stdin)))")
 
-    # Parse questions and check if they have answers
-    # Format: "1) Question: <text>\n   - Answer: <text>"
-    local in_question=false
-    local question_num=""
-    local question_text=""
-    local has_answer=false
-
-    while IFS= read -r line; do
-        # Match question lines like "1) Question: something" or "Question: something"
-        if echo "$line" | grep -qE '^[[:space:]]*[0-9]+\)[[:space:]]+Question:[[:space:]]+.+$'; then
-            # Save previous question if it was unanswered
-            if [ "$in_question" = true ] && [ "$has_answer" = false ] && [ -n "$question_text" ]; then
-                unanswered_questions+=("$question_num: $question_text")
-            fi
-
-            # Start new question
-            in_question=true
-            question_num=$(echo "$line" | sed -E 's/^[[:space:]]*([0-9]+)\).*/\1/')
-            question_text=$(echo "$line" | sed -E 's/^[[:space:]]*[0-9]+\)[[:space:]]+Question:[[:space:]]+//')
-            has_answer=false
-        elif echo "$line" | grep -qE '^[[:space:]]+-[[:space:]]+Answer:[[:space:]]+.+$'; then
-            # Found a non-empty answer
-            has_answer=true
-        elif echo "$line" | grep -qE '^[[:space:]]+-[[:space:]]+Answer:[[:space:]]*$'; then
-            # Found an empty answer
-            has_answer=false
-        fi
-    done <<< "$questions_section"
-
-    # Check last question
-    if [ "$in_question" = true ] && [ "$has_answer" = false ] && [ -n "$question_text" ]; then
-        unanswered_questions+=("$question_num: $question_text")
+    if [ "$comment_count" -eq 0 ]; then
+        warn "No comments found. Please add answers to blocking questions as comments."
+        info "Add a comment to the issue with answers, then run this command again."
+        return 1
     fi
 
-    # If there are unanswered questions, list them and error
-    if [ ${#unanswered_questions[@]} -gt 0 ]; then
-        error "Blocking questions remain unanswered in $questions_file:"$'\n'"$(printf '  - Question %s\n' "${unanswered_questions[@]}")"
-    fi
+    success "Comments found ($comment_count) - assuming questions have been answered"
 
-    success "All blocking questions have been answered"
+    # Update label to REFINING
+    info "Updating label to state:REFINING..."
+    api_replace_labels "$issue_number" "state:REFINING"
 
-    # Update state to REFINING
-    update_ticket_state "$ticket_file" "REFINING"
-    success "State updated to REFINING - ready for refinement pipeline"
+    success "State updated to state:REFINING - ready for refinement pipeline"
 
+    # Add a comment logging this action
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local log_comment=$(cat <<EOF
+**Run Log: $timestamp**
 
-    # Log run to runs.md
-    cat >> "$runs_file" <<EOF
-
----
-## Run: $timestamp
 - Action: answer
-- State transition: NEEDS_INFO → REFINING
+- State transition: state:NEEDS_INFO → state:REFINING
 - Next steps: Run refine again to complete pipeline
-
 EOF
+)
+
+    api_add_comment "$issue_number" "$log_comment"
 
     echo ""
     info "Next steps:"
-    echo "  1. Run: vault67 refine $ticket_id"
+    echo "  1. Run: vault67 refine $issue_number"
 }
 
-# Implement command - hand off to Gas Town
+# Implement command - hand off to Gas Town (using Codeberg API)
 cmd_implement() {
-    local ticket_id=""
+    local issue_number=""
     local executor="gastown"
 
     # Parse arguments
@@ -1330,8 +1403,8 @@ cmd_implement() {
                 error "Unknown option: $1"
                 ;;
             *)
-                if [ -z "$ticket_id" ]; then
-                    ticket_id="$1"
+                if [ -z "$issue_number" ]; then
+                    issue_number="$1"
                     shift
                 else
                     error "Unexpected argument: $1"
@@ -1341,70 +1414,92 @@ cmd_implement() {
     done
 
     # Validate required arguments
-    [ -z "$ticket_id" ] && error "Ticket ID is required"
+    [ -z "$issue_number" ] && error "Issue number is required"
 
-    # Ensure ticket directory exists
-    local ticket_dir="$TICKETS_DIR/$ticket_id"
-    [ ! -d "$ticket_dir" ] && error "Ticket not found: $ticket_id"
+    info "Fetching issue #$issue_number from Codeberg..."
 
-    local ticket_file="$ticket_dir/ticket.md"
-    local promptpack_file="$ticket_dir/promptpack.md"
-    local runs_file="$ticket_dir/runs.md"
+    # GET issue
+    local issue_json=$(api_get_issue "$issue_number")
 
-    # Validate required files exist
-    [ ! -f "$ticket_file" ] && error "ticket.md not found for $ticket_id"
-    [ ! -f "$promptpack_file" ] && error "promptpack.md not found for $ticket_id (run refine first)"
-
-    # Check current state
-    local current_state=$(get_ticket_state "$ticket_file")
-    info "Current state: $current_state"
-
-    # Guard: require READY_TO_IMPLEMENT
-    if [ "$current_state" != "READY_TO_IMPLEMENT" ]; then
-        error "Ticket must be in READY_TO_IMPLEMENT state (current: $current_state)"
+    # Check if issue exists
+    local issue_title=$(echo "$issue_json" | python3 -c "import json, sys; print(json.load(sys.stdin).get('title', ''))" 2>/dev/null)
+    if [ -z "$issue_title" ]; then
+        error "Issue #$issue_number not found or API error"
     fi
 
-    # Update state to IMPLEMENTING
-    info "Updating state to IMPLEMENTING..."
-    update_ticket_state "$ticket_file" "IMPLEMENTING"
-    success "State updated to IMPLEMENTING"
+    local issue_body=$(echo "$issue_json" | python3 -c "import json, sys; print(json.load(sys.stdin).get('body', ''))")
+
+    # Extract current state label
+    local current_label=$(get_issue_state_label "$issue_json")
+    info "Current state: $current_label"
+
+    # Guard: require READY_TO_IMPLEMENT
+    if [ "$current_label" != "state:READY_TO_IMPLEMENT" ]; then
+        error "Issue must be in state:READY_TO_IMPLEMENT (current: $current_label)"
+    fi
+
+    # Update label to IMPLEMENTING
+    info "Updating label to state:IMPLEMENTING..."
+    api_replace_labels "$issue_number" "state:IMPLEMENTING"
+    success "State updated to state:IMPLEMENTING"
+
+    # Extract metadata from issue body
+    local repo=$(echo "$issue_body" | grep '^\*\*Repo:\*\*' | sed 's/^\*\*Repo:\*\*[[:space:]]*//')
+    local issue_url=$(echo "$issue_json" | python3 -c "import json, sys; print(json.load(sys.stdin).get('html_url', ''))")
 
     # Hand off to Gas Town
     info "Handing off to Gas Town ($executor)..."
     echo ""
 
-    # Read the promptpack.md - this is the handoff payload for Gas Town
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # Extract title and repo from ticket.md
-    local title=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^title:' | sed 's/^title: //')
-    local repo=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^repo:' | sed 's/^repo:[[:space:]]*//')
+    # Look for promptpack in comments
+    info "Extracting promptpack from issue comments..."
+    local comments_json=$(api_get_comments "$issue_number")
+    local promptpack=$(echo "$comments_json" | python3 -c "
+import json, sys
+comments = json.load(sys.stdin)
+for comment in comments:
+    body = comment.get('body', '')
+    if 'Implementation Prompt Pack' in body or 'Promptpack' in body:
+        print(body)
+        break
+" 2>/dev/null)
+
+    # If no promptpack in comments, extract from issue body
+    if [ -z "$promptpack" ]; then
+        warn "No promptpack found in comments, using issue body"
+        promptpack="$issue_body"
+    fi
 
     # Display promptpack content
-    info "Promptpack content ($promptpack_file):"
+    info "Promptpack content:"
     echo ""
     echo "────────────────────────────────────────────────────────────"
-    cat "$promptpack_file"
+    echo "$promptpack"
     echo "────────────────────────────────────────────────────────────"
     echo ""
 
-    # Append run entry to runs.md
-    cat >> "$runs_file" <<EOF
+    # Add run log comment
+    local log_comment=$(cat <<EOF
+**Run Log: $timestamp**
 
----
-## Run: $timestamp
 - Action: implement
 - Executor: $executor
-- State transition: READY_TO_IMPLEMENT → IMPLEMENTING
-- Promptpack: $promptpack_file
-- Repo: $repo
+- State transition: state:READY_TO_IMPLEMENT → state:IMPLEMENTING
 - Status: Ready for Gas Town handoff
 - Notes: Awaiting Gas Town assignment
 
-EOF
+## Implementation Package
 
-    success "Run logged to runs.md"
-    success "Ticket state updated to IMPLEMENTING"
+The issue body and comments contain the complete implementation specification.
+EOF
+)
+
+    info "Adding run log comment..."
+    api_add_comment "$issue_number" "$log_comment"
+
+    success "Run logged to issue comments"
     echo ""
 
     # Provide accurate Gas Town handoff instructions
@@ -1414,44 +1509,51 @@ EOF
     echo "To hand off this work to Gas Town, you have two options:"
     echo ""
     echo "Option 1: Create a bead and sling it to a polecat"
-    echo "  # Create a bead for this ticket (using bd command or Gas Town UI)"
-    echo "  # Then sling it:"
+    echo "  # Create a bead for this issue"
     echo "  gt sling <bead-id> $executor"
     echo ""
     echo "Option 2: Manual handoff"
-    echo "  # Copy the promptpack content above"
-    echo "  # Assign work to a polecat manually with the content"
+    echo "  # Assign work to a polecat manually with the issue URL"
     echo ""
-    echo "📍 Promptpack location: $promptpack_file"
+    echo "📍 Issue: #$issue_number"
+    echo "📍 URL: $issue_url"
     echo "📍 Repository: $repo"
-    echo "📍 Ticket: $ticket_id"
 }
 
 # Main command dispatcher
 main() {
     if [ $# -eq 0 ]; then
         cat <<EOF
-vault67 - CLI for multi-agent ticket refinement
+vault67 - CLI for multi-agent ticket refinement (Codeberg/Forgejo API)
 
 Usage:
   vault67 create --title "<title>" --repo "<path_or_url>" [--base-ref "main"]
-  vault67 refine <ticket-id>
-  vault67 security_agent <ticket-id>
-  vault67 answer <ticket-id>
-  vault67 implement <ticket-id> [--executor gastown]
+  vault67 refine <issue-number>
+  vault67 answer <issue-number>
+  vault67 implement <issue-number> [--executor gastown]
 
 Commands:
-  create          Create a new ticket with folder and MD files
-  refine          Run multi-agent refinement pipeline
-  security_agent  Run only the Security & Compliance Agent
-  answer          Answer blocking questions (HITL)
+  create          Create a new issue on Codeberg with spec template
+  refine          Run multi-agent refinement pipeline (simplified version)
+  answer          Answer blocking questions (HITL) and resume refinement
   implement       Hand off to Gas Town for implementation
+
+Configuration:
+  Create $CONFIG_FILE or set environment variables:
+    CODEBERG_TOKEN   - Your Codeberg API token (required)
+    CODEBERG_API     - API base URL (default: https://codeberg.org/api/v1)
+    CODEBERG_REPO    - Owner/Repo (default: Logikfabriken/Vault67)
 
 Examples:
   vault67 create --title "Add rate limiting" --repo "/repos/my-service"
-  vault67 refine TCK-000001
-  vault67 security_agent TCK-000001
-  vault67 implement TCK-000001
+  vault67 refine 42
+  vault67 answer 42
+  vault67 implement 42
+
+Notes:
+  - All tickets are now Codeberg issues
+  - Issue numbers are used instead of local ticket IDs
+  - Full agent pipeline integration is in progress
 EOF
         exit 0
     fi

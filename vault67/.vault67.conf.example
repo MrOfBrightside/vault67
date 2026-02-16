@@ -1,0 +1,14 @@
+# vault67 Configuration File
+# Copy this to .vault67.conf and fill in your values
+
+# Codeberg API Token (required)
+# Get your token from: https://codeberg.org/user/settings/applications
+CODEBERG_TOKEN="your-token-here"
+
+# Codeberg API Base URL (optional)
+# Default: https://codeberg.org/api/v1
+CODEBERG_API="https://codeberg.org/api/v1"
+
+# Repository in format: Owner/Repo (optional)
+# Default: Logikfabriken/Vault67
+CODEBERG_REPO="Logikfabriken/Vault67"

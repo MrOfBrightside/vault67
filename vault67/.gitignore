@@ -1,2 +1,5 @@
 .DS_Store
 vault67/tickets/TCK-000084/
+
+# vault67 config (contains API token)
+.vault67.conf
