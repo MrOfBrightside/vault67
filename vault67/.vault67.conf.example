@@ -1,0 +1,7 @@
+# Codeberg API Configuration
+# Copy this to .vault67.conf and fill in your token
+# IMPORTANT: Add .vault67.conf to .gitignore!
+
+CODEBERG_TOKEN=your_token_here
+CODEBERG_API=https://codeberg.org/api/v1
+CODEBERG_REPO=Logikfabriken/Vault67
