@@ -1244,9 +1244,30 @@ ba_translator_agent() {
     local scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
     local scope_out=$(sed -n '/^### Out of scope$/,/^## /p' "$spec_file" | sed '1d;$d')
 
+    # Check if there's actually substance to translate — skip if all fields are
+    # empty or only contain placeholder text (dashes, question prompts)
+    local _has_substance=false
+    for _field in "$context" "$goal" "$requirements" "$scope_in"; do
+        # Strip placeholder lines: lone dashes, "Why is this needed?", "What must be true?", etc.
+        local _clean=$(echo "$_field" | grep -vE '^[[:space:]]*-?[[:space:]]*$|^[[:space:]]*$|^Why is|^What must|^What problem' | head -1)
+        if [ -n "$_clean" ]; then
+            _has_substance=true
+            break
+        fi
+    done
+    if [ "$_has_substance" = false ]; then
+        warn "No context, goal, or requirements filled in — skipping Gherkin generation"
+        warn "Fill in the spec sections first, then re-run refine"
+        return 1
+    fi
+
     # Extract the feature title from existing Gherkin (if any)
     local feature_title=$(echo "$gherkin_block" | grep "Feature:" | head -1 | sed 's/.*Feature:[[:space:]]*//')
-    [ -z "$feature_title" ] && feature_title=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d' | head -1)
+    # Fall back to issue title from spec metadata, then goal
+    if [ -z "$feature_title" ]; then
+        feature_title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
+    fi
+    [ -z "$feature_title" ] && feature_title=$(echo "$goal" | head -1)
 
     # Build the LLM prompt
     local prompt="You are a Business Analyst writing Gherkin acceptance criteria for a software feature.
