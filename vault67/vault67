@@ -1722,6 +1722,105 @@ cmd_delete() {
     success "Issue #${issue_number} closed and marked as DONE"
 }
 
+# Translate a project-created issue into a full spec without asking questions
+# Project issues have enough context from the feature title + project prompt
+_translate_project_issue() {
+    local issue_number="$1"
+    local issue_title="$2"
+    local raw_text="$3"
+    local today="$4"
+
+    # Extract project name and prompt from body
+    local project_name=$(echo "$raw_text" | grep "Created from project:" | sed 's/.*\*\*\(.*\)\*\*/\1/')
+    local project_prompt=$(echo "$raw_text" | sed -n 's/^> //p' | head -1)
+
+    local spec_body="# Specification
+
+**Metadata:**
+- Repo: \`https://git.logikfabriken.se/${FORGEJO_REPO}.git\`
+- Base ref: \`main\`
+- Created: ${today}
+
+## Context
+Part of project: **${project_name}**
+
+Project scope: ${project_prompt}
+
+This feature: ${issue_title}
+
+## Goal
+${issue_title}
+
+## Scope
+### In scope
+- ${issue_title}
+
+### Out of scope
+- Unrelated project features are handled by separate issues
+- Infrastructure, deployment, and CI/CD pipeline changes
+- Performance optimization beyond functional requirements
+
+## Requirements (Raw, BA input)
+- ${issue_title}
+- Part of project: ${project_name}
+
+## Acceptance Criteria (Gherkin)
+\`\`\`gherkin
+Feature: ${issue_title}
+
+  Scenario: ${issue_title} is implemented
+    Given the project ${project_name} is being developed
+    When ${issue_title} is complete
+    Then the feature works as specified
+\`\`\`
+
+## Architecture alignment
+- Relevant modules:
+- Constraints:
+- Allowed paths:
+- Forbidden paths:
+
+## Security and compliance
+- Data classification:
+- AuthN/AuthZ:
+- Logging/Audit:
+- PII/Secrets:
+- Security constraints:
+
+## Test strategy
+- Golden build command:
+- Golden test command:
+- Scenario to test mapping:
+
+## Engineering principles and DoD additions
+-
+
+## Open questions
+-
+
+## Definition of Done
+- PR created with changes scoped correctly
+- Tests added/updated
+- All required checks green
+- Acceptance criteria satisfied
+- Documentation updated (if needed)
+
+## Definition of Ready
+- [ ] Scope in/out defined
+- [ ] Gherkin scenarios are present and testable
+- [ ] Architecture alignment reviewed and constraints captured
+- [ ] Security/compliance reviewed and constraints captured
+- [ ] Test strategy defined for each scenario
+- [ ] Repo golden commands known or explicitly blocked
+- [ ] Allowed/forbidden paths set
+- [ ] No blocking questions remain"
+
+    # Update issue body with structured spec
+    api_update_issue "$issue_number" "$spec_body" > /dev/null
+    success "Issue #${issue_number} translated to structured spec (project mode)"
+    return 0
+}
+
 # BA Translator: convert plain text issue body into structured spec
 cmd_translate() {
     local issue_number=""
@@ -1749,6 +1848,13 @@ cmd_translate() {
 
     local raw_text="$issue_body"
     local today=$(date -u +"%Y-%m-%d")
+
+    # Detect project-created issues — these have enough context to skip questions
+    if echo "$raw_text" | grep -q "Created from project:"; then
+        info "Detected project-created issue — generating spec from project context"
+        _translate_project_issue "$issue_number" "$issue_title" "$raw_text" "$today"
+        return $?
+    fi
 
     # Analyze text quality - identify what's missing
     local questions=""
@@ -1900,6 +2006,7 @@ cmd_project() {
         create) _project_create "$@" ;;
         list)   _project_list "$@" ;;
         status) _project_status "$@" ;;
+        run)    _project_run "$@" ;;
         *)      error "Unknown project subcommand: $subcmd" ;;
     esac
 }
@@ -2128,6 +2235,138 @@ for d in deps:
 " "${texts[@]}"
 }
 
+# Run a project end-to-end: create → process all issues in dependency order
+_project_run() {
+    local name=""
+    local description=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            --description|--desc) description="$2"; shift 2 ;;
+            *)
+                if [ -z "$name" ]; then
+                    name="$1"; shift
+                elif [ -z "$description" ]; then
+                    description="$1"; shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    [ -z "$name" ] && error "Usage: vault67 project run <name> <description>"
+    [ -z "$description" ] && error "Usage: vault67 project run <name> <description>"
+
+    # Step 1: Create the project (milestone + issues + deps)
+    _project_create "$name" "$description"
+
+    echo ""
+    echo "=========================================="
+    info "Starting inline pipeline processing..."
+    echo "=========================================="
+    echo ""
+
+    # Step 2: Get the milestone we just created (latest one with this name)
+    local milestones_response=$(api_request "GET" "/repos/${FORGEJO_REPO}/milestones?state=open&limit=10")
+    local milestone_id=$(echo "$milestones_response" | python3 -c "
+import sys, json
+milestones = json.load(sys.stdin)
+for m in sorted(milestones, key=lambda x: x['id'], reverse=True):
+    if m['title'] == sys.argv[1]:
+        print(m['id'])
+        break
+" "$name" 2>/dev/null)
+
+    [ -z "$milestone_id" ] && error "Could not find milestone for project: $name"
+
+    # Step 3: Get all issues in this milestone
+    local issues_response=$(api_request "GET" "/repos/${FORGEJO_REPO}/issues?milestones=${milestone_id}&state=open&type=issues&limit=50")
+    local all_issue_nums=$(echo "$issues_response" | python3 -c "
+import sys, json
+issues = json.load(sys.stdin)
+for i in sorted(issues, key=lambda x: x['number']):
+    print(i['number'])
+" 2>/dev/null)
+
+    local total_issues=$(echo "$all_issue_nums" | wc -l | tr -d ' ')
+    local processed=0
+    local max_rounds=$((total_issues * 2))  # Safety limit
+    local round=0
+
+    info "Processing ${total_issues} issues in dependency order..."
+    echo ""
+
+    # Step 4: Process in rounds — each round processes unblocked issues
+    while [ $processed -lt "$total_issues" ] && [ $round -lt $max_rounds ]; do
+        round=$((round + 1))
+        local progress_made=false
+
+        for issue_num in $all_issue_nums; do
+            # Check if already processed (not state:NEW)
+            local issue_data=$(api_get_issue "$issue_num" 2>/dev/null) || continue
+            local labels=$(echo "$issue_data" | extract_issue_labels)
+
+            # Skip if not in a processable state
+            if ! echo "$labels" | grep -q "state:NEW"; then
+                continue
+            fi
+
+            # Check dependencies
+            local blockers
+            blockers=$(api_check_deps_resolved "$issue_num" 2>/dev/null) || true
+            if [ -n "$blockers" ]; then
+                local blocker_list=$(echo "$blockers" | tr '\n' ',' | sed 's/,$//')
+                info "  #${issue_num}: blocked by #${blocker_list} — skipping this round"
+                continue
+            fi
+
+            # Process this issue
+            echo "-------------------------------------------"
+            info "Processing issue #${issue_num} (round ${round})"
+            echo "-------------------------------------------"
+
+            # Translate
+            "$SCRIPT_DIR/vault67" translate "$issue_num" 2>&1 | while IFS= read -r line; do echo "  $line"; done || true
+
+            # Re-check state after translate (may have changed to NEEDS_INFO)
+            local post_translate=$(api_get_issue "$issue_num" 2>/dev/null)
+            local post_labels=$(echo "$post_translate" | extract_issue_labels)
+
+            if echo "$post_labels" | grep -q "state:NEEDS_INFO"; then
+                warn "  #${issue_num}: needs info after translate — skipping refine"
+                processed=$((processed + 1))
+                progress_made=true
+                continue
+            fi
+
+            # Ensure still in NEW state for refine
+            if echo "$post_labels" | grep -qE "state:(NEW|REFINING)"; then
+                "$SCRIPT_DIR/vault67" refine "$issue_num" 2>&1 | while IFS= read -r line; do echo "  $line"; done || true
+            fi
+
+            processed=$((processed + 1))
+            progress_made=true
+            echo ""
+        done
+
+        # If no progress was made this round, we're stuck
+        if [ "$progress_made" = false ]; then
+            warn "No progress in round ${round} — remaining issues may have circular or external dependencies"
+            break
+        fi
+    done
+
+    echo ""
+    echo "=========================================="
+    info "Pipeline complete. Processed ${processed}/${total_issues} issues."
+    echo "=========================================="
+
+    # Show final status
+    _project_status "$milestone_id"
+}
+
 _project_list() {
     local state="open"
     while [ $# -gt 0 ]; do
@@ -2346,6 +2585,67 @@ _deps_check() {
     return $result
 }
 
+# Done command - mark issue as DONE, close it, report unblocked downstream
+cmd_done() {
+    local issue_number=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            [0-9]*) issue_number="$1"; shift ;;
+            *) error "Usage: vault67 done <issue-number>" ;;
+        esac
+    done
+
+    [ -z "$issue_number" ] && error "Usage: vault67 done <issue-number>"
+    require_api_config
+
+    info "Marking issue #${issue_number} as DONE..."
+
+    # Set state:DONE label
+    api_replace_labels "$issue_number" "state:DONE" > /dev/null
+
+    # Close the issue on Forgejo
+    local json_data=$(python3 -c "import json; print(json.dumps({'state': 'closed'}))")
+    api_request "PATCH" "/repos/${FORGEJO_REPO}/issues/${issue_number}" "$json_data" > /dev/null
+
+    # Add completion comment
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    api_add_comment "$issue_number" "Issue completed and closed at ${timestamp} via \`vault67 done\`" > /dev/null
+
+    success "Issue #${issue_number} marked as DONE and closed"
+
+    # Check what this issue was blocking
+    local blocks_response
+    blocks_response=$(api_get_blocks "$issue_number" 2>/dev/null) || blocks_response="[]"
+
+    local unblocked
+    unblocked=$(python3 -c "
+import sys, json
+blocks = json.load(sys.stdin)
+if not blocks:
+    sys.exit(0)
+for b in blocks:
+    if b.get('state') != 'closed':
+        print(b['number'])
+" <<< "$blocks_response" 2>/dev/null) || true
+
+    if [ -n "$unblocked" ]; then
+        echo ""
+        info "Downstream issues potentially unblocked:"
+        for blocked_num in $unblocked; do
+            # Check if ALL deps for this blocked issue are now resolved
+            local still_blocked
+            still_blocked=$(api_check_deps_resolved "$blocked_num" 2>/dev/null) || true
+            if [ -z "$still_blocked" ]; then
+                success "  #${blocked_num} — all dependencies resolved, ready for processing"
+            else
+                local remaining=$(echo "$still_blocked" | tr '\n' ',' | sed 's/,$//')
+                info "  #${blocked_num} — still blocked by #${remaining}"
+            fi
+        done
+    fi
+}
+
 cmd_list() {
     require_api_config
 
@@ -2520,11 +2820,13 @@ Usage:
   vault67 refine <issue-number>
   vault67 answer <issue-number>
   vault67 implement <issue-number> [--executor gastown]
+  vault67 done <issue-number>
   vault67 delete <issue-number> [--force]
   vault67 translate <issue-number>
   vault67 list [--all]
   vault67 status [issue-number]
   vault67 project create <name> <description>
+  vault67 project run <name> <description>
   vault67 project list [--all]
   vault67 project status <milestone-id>
   vault67 deps add <issue> <depends-on>
@@ -2536,11 +2838,12 @@ Commands:
   refine          Run multi-agent refinement pipeline on an issue
   answer          Mark blocking questions as answered (HITL)
   implement       Hand off issue to Gas Town for implementation
+  done            Mark issue as DONE, close it, report unblocked issues
   delete          Close an issue (with confirmation)
   translate       Convert plain text issue to structured spec
   list            List issues with state and title
   status          Show pipeline overview or single issue details
-  project         Manage projects (milestones with auto-breakdown)
+  project         Manage projects (create, run, list, status)
   deps            Manage issue dependencies (add/remove/show/check)
 
 Examples:
@@ -2578,6 +2881,9 @@ HELPEOF
             ;;
         implement)
             cmd_implement "$@"
+            ;;
+        done)
+            cmd_done "$@"
             ;;
         delete)
             cmd_delete "$@"
