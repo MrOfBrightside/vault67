@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# vault67-watch - Daemon mode: polls Forgejo for NEW issues and auto-refines them
+# Usage: vault67-watch [--interval <seconds>]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VAULT67="$SCRIPT_DIR/vault67"
+
+POLL_INTERVAL="${WATCH_INTERVAL:-30}"
+
+# Parse args
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --interval) POLL_INTERVAL="$2"; shift 2 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+log() {
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] $*"
+}
+
+log "vault67-watch starting (poll every ${POLL_INTERVAL}s)"
+log "API: ${FORGEJO_API:-not set}"
+log "Repo: ${FORGEJO_REPO:-not set}"
+
+if [ -z "${FORGEJO_TOKEN:-}" ] || [ -z "${FORGEJO_API:-}" ] || [ -z "${FORGEJO_REPO:-}" ]; then
+    log "ERROR: FORGEJO_TOKEN, FORGEJO_API, and FORGEJO_REPO must be set"
+    exit 1
+fi
+
+while true; do
+    # Fetch open issues with state:NEW label
+    response=$(curl -s \
+        -H "Authorization: token ${FORGEJO_TOKEN}" \
+        -H "Accept: application/json" \
+        "${FORGEJO_API}/repos/${FORGEJO_REPO}/issues?state=open&type=issues&labels=state:NEW&limit=50" 2>/dev/null || echo "[]")
+
+    new_issues=$(echo "$response" | python3 -c "
+import sys, json
+try:
+    issues = json.load(sys.stdin)
+    for issue in issues:
+        print(issue['number'])
+except:
+    pass
+" 2>/dev/null)
+
+    if [ -n "$new_issues" ]; then
+        for issue_num in $new_issues; do
+            log "Found NEW issue #${issue_num}"
+
+            # Step 0: Check dependencies — skip if blocked
+            blockers=$("$VAULT67" deps check "$issue_num" 2>/dev/null) || true
+            if [ -n "$blockers" ]; then
+                blocker_list=$(echo "$blockers" | tr '\n' ',' | sed 's/,$//')
+                log "  Issue #${issue_num} blocked by #${blocker_list} — skipping"
+                continue
+            fi
+
+            # Step 1: Translate plain text to spec (if needed)
+            log "  Running BA translator..."
+            translate_output=$("$VAULT67" translate "$issue_num" 2>&1) || true
+            echo "$translate_output" | while IFS= read -r line; do [ -n "$line" ] && log "  $line"; done
+
+            # If translator set NEEDS_INFO, skip refine
+            if echo "$translate_output" | grep -q "needs clarification"; then
+                log "Issue #${issue_num} needs clarification - skipping refine"
+                continue
+            fi
+
+            # Step 2: Refine
+            log "  Running refinement pipeline..."
+            if "$VAULT67" refine "$issue_num" 2>&1 | while IFS= read -r line; do log "  $line"; done; then
+                log "Issue #${issue_num} refinement complete"
+            else
+                log "Issue #${issue_num} refinement finished (check state)"
+            fi
+        done
+    fi
+
+    sleep "$POLL_INTERVAL"
+done
