@@ -812,16 +812,21 @@ architecture_compliance_agent() {
         return 0
     fi
 
+    # Helper to read a section from a markdown file
+    _read_md_section() {
+        local section="$1" file="$2"
+        awk "/^## ${section}\$/{found=1;next} /^## /{if(found)exit} found && !/^#/ && !/^[[:space:]]*\$/{print}" "$file" 2>/dev/null
+    }
+
     # Get repo path
     local repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
 
-    # --- Step 1: Detect language/stack from repo ---
+    # --- Step 1: Detect language/stack from ## Language detection ---
     local detected_stack=""
-    local detected_lang=""
+    local _marker_files=""  # collect matched markers for root file reporting
     if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
         info "Inspecting repository at ${repo_path}..."
 
-        # Check marker files against language detection rules
         if [ -f "$default_rules" ]; then
             local in_lang=false
             while IFS= read -r line; do
@@ -835,55 +840,49 @@ architecture_compliance_agent() {
                     local rest=$(echo "$line" | cut -d: -f2-)
                     local lang=$(echo "$rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                     # Handle glob patterns (e.g. *.csproj)
+                    local _matched=false
                     if [[ "$marker" == *"*"* ]]; then
-                        if ls "$repo_path"/$marker 1>/dev/null 2>&1; then
-                            detected_stack="${detected_stack:+$detected_stack, }${lang}"
-                            [ -z "$detected_lang" ] && detected_lang="$lang"
-                        fi
+                        ls "$repo_path"/$marker 1>/dev/null 2>&1 && _matched=true
                     elif [ -f "$repo_path/$marker" ]; then
-                        detected_stack="${detected_stack:+$detected_stack, }${lang}"
-                        [ -z "$detected_lang" ] && detected_lang="$lang"
+                        _matched=true
+                    fi
+                    if [ "$_matched" = true ]; then
+                        _marker_files="${_marker_files:+$_marker_files, }${marker}"
+                        # Deduplicate: only add lang if not already in stack
+                        if ! echo "$detected_stack" | grep -q "$lang"; then
+                            detected_stack="${detected_stack:+$detected_stack, }${lang}"
+                        fi
                     fi
                 fi
             done < "$default_rules"
         fi
-
-        # Fallback: check common markers directly if no rules file
-        if [ -z "$detected_stack" ]; then
-            [ -f "$repo_path/package.json" ] && detected_stack="Node.js/TypeScript"
-            [ -f "$repo_path/pyproject.toml" ] || [ -f "$repo_path/setup.py" ] && detected_stack="${detected_stack:+$detected_stack, }Python"
-            [ -f "$repo_path/go.mod" ] && detected_stack="${detected_stack:+$detected_stack, }Go"
-            [ -f "$repo_path/Cargo.toml" ] && detected_stack="${detected_stack:+$detected_stack, }Rust"
-            [ -f "$repo_path/Gemfile" ] && detected_stack="${detected_stack:+$detected_stack, }Ruby"
-        fi
-
-        # Check for Docker
-        [ -f "$repo_path/Dockerfile" ] || [ -f "$repo_path/docker-compose.yml" ] && \
-            detected_stack="${detected_stack:+$detected_stack, }Docker"
     fi
     [ -z "$detected_stack" ] && detected_stack="Not detected (repo not accessible)"
 
-    # --- Step 2: Scan actual directory structure ---
+    # --- Step 2: Scan directory structure using ## Skip dirs ---
     local repo_structure=""
     if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
-        # List top-level directories (excluding noise)
-        local _skip_dirs="|node_modules|vendor|__pycache__|.git|dist|build|.next|.nuxt|target|"
+        # Build skip list from rules file
+        local _skip_dirs=""
+        if [ -f "$default_rules" ]; then
+            _skip_dirs=$(_read_md_section "Skip dirs" "$default_rules" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed 's/^/|/' | tr -d '\n')
+            _skip_dirs="${_skip_dirs}|"
+        fi
+
         local _dir_list=""
         for d in "$repo_path"/*/; do
             [ -d "$d" ] || continue
             local dirname=$(basename "$d")
-            echo "$_skip_dirs" | grep -q "|${dirname}|" && continue
+            # Skip hidden dirs and dirs in skip list
+            [[ "$dirname" == .* ]] && continue
+            [ -n "$_skip_dirs" ] && echo "$_skip_dirs" | grep -q "|${dirname}|" && continue
             local count=$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')
             _dir_list="${_dir_list:+$_dir_list, }${dirname}/ (${count} items)"
         done
         repo_structure="$_dir_list"
 
-        # Also note key root files
-        local root_files=""
-        for f in Makefile Dockerfile docker-compose.yml package.json pyproject.toml go.mod Cargo.toml Gemfile; do
-            [ -f "$repo_path/$f" ] && root_files="${root_files:+$root_files, }${f}"
-        done
-        [ -n "$root_files" ] && repo_structure="${repo_structure:+$repo_structure | Root files: }${root_files}"
+        # Report matched root marker files
+        [ -n "$_marker_files" ] && repo_structure="${repo_structure:+$repo_structure | Root files: }${_marker_files}"
     fi
 
     # --- Step 3: Map Gherkin keywords to actual directories ---
@@ -892,25 +891,32 @@ architecture_compliance_agent() {
     local scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then" 2>/dev/null)
 
     if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null && [ -n "$scenarios" ]; then
-        # Scan actual directories for keyword matches in filenames
-        # This finds which parts of the repo are likely touched by this feature
-        local keyword_hits=""
+        # Build stop word regex from ## Stop words
+        local _stop_re="^(given|when|then|that|this|from|with)$"
+        if [ -f "$default_rules" ]; then
+            local _stop_words=$(_read_md_section "Stop words" "$default_rules" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | paste -sd'|' -)
+            [ -n "$_stop_words" ] && _stop_re="^(${_stop_words})$"
+        fi
+
+        # Build find exclusion args from ## Skip dirs
+        local _find_excludes=""
+        if [ -f "$default_rules" ]; then
+            _find_excludes=$(_read_md_section "Skip dirs" "$default_rules" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | while read -r skip; do
+                [ -n "$skip" ] && echo "-not -path */${skip}/*"
+            done | tr '\n' ' ')
+        fi
 
         # Extract nouns/verbs from scenarios for matching
         local scenario_words=$(echo "$scenarios" | tr '[:upper:]' '[:lower:]' | \
             sed 's/[^a-z ]/ /g' | tr ' ' '\n' | sort -u | \
-            awk 'length >= 4' | grep -vE '^(given|when|then|that|this|from|with|have|does|should|will|the|and|for|are|not)$')
+            awk 'length >= 4' | grep -vE "$_stop_re")
 
         # Find directories containing files whose names match scenario keywords
         for word in $scenario_words; do
-            local matches=$(find "$repo_path" -maxdepth 3 -type f \
-                \( -name "*${word}*" -o -name "*$(echo "$word" | sed 's/s$//')*" \) \
-                -not -path "*/node_modules/*" -not -path "*/.git/*" \
-                -not -path "*/vendor/*" -not -path "*/__pycache__/*" \
-                -not -path "*/dist/*" -not -path "*/build/*" \
-                2>/dev/null | head -5)
+            local matches=$(eval "find \"$repo_path\" -maxdepth 3 -type f \
+                \\( -name \"*${word}*\" -o -name \"*$(echo "$word" | sed 's/s$//')*\" \\) \
+                $_find_excludes" 2>/dev/null | head -5)
             if [ -n "$matches" ]; then
-                # Get unique parent directories relative to repo root
                 local dirs=$(echo "$matches" | while read -r f; do
                     dirname "$f" | sed "s|^${repo_path}/||"
                 done | sort -u)
@@ -930,7 +936,6 @@ architecture_compliance_agent() {
     local repo_config=""
 
     if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
-        # Check for per-project architecture config
         for cfg in "$repo_path/ARCHITECTURE.md" "$repo_path/.vault67/architecture.md" "$repo_path/.github/architecture.md"; do
             if [ -f "$cfg" ]; then
                 repo_config="$cfg"
@@ -938,12 +943,6 @@ architecture_compliance_agent() {
             fi
         done
     fi
-
-    # Helper to read a section from a markdown file
-    _read_md_section() {
-        local section="$1" file="$2"
-        awk "/^## ${section}\$/{found=1;next} /^## /{if(found)exit} found && !/^#/ && !/^[[:space:]]*\$/{print}" "$file" 2>/dev/null
-    }
 
     if [ -n "$repo_config" ]; then
         info "Found project config: ${repo_config}"
@@ -957,7 +956,6 @@ architecture_compliance_agent() {
     if [ -z "$project_forbidden" ] && [ -f "$default_rules" ]; then
         project_forbidden=$(_read_md_section "Forbidden paths" "$default_rules")
     fi
-    [ -z "$project_forbidden" ] && project_forbidden=".git/, node_modules/, .env, secrets.*, vendor/, __pycache__/"
 
     # --- Step 5: Build output ---
     local temp_arch=$(mktemp)
@@ -973,7 +971,9 @@ architecture_compliance_agent() {
         if [ -n "$project_constraints" ]; then
             echo "- Constraints: ${project_constraints}"
         fi
-        echo "- Forbidden paths: ${project_forbidden}"
+        if [ -n "$project_forbidden" ]; then
+            echo "- Forbidden paths: ${project_forbidden}"
+        fi
         if [ -n "$project_notes" ]; then
             echo ""
             echo "### Project notes"
