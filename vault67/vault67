@@ -524,6 +524,11 @@ judge_agent() {
     # Extract content from spec.md
     local spec_content=$(cat "$spec_file")
 
+    # Extract key fields for multi-check use
+    local context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
+    local goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
+    local requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
+
     # Check 1: Scope in/out defined (reject placeholders)
     local has_scope=false
     local scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
@@ -547,17 +552,26 @@ judge_agent() {
 
     # Check 2: Gherkin scenarios present, testable, and not generic placeholders
     local has_gherkin=false
+    local _gherkin_fail_reason=""
     local gherkin_block=$(echo "$spec_content" | sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p')
     if echo "$gherkin_block" | grep -q "Feature:\s\+\w" && \
        echo "$gherkin_block" | grep -q "Scenario:\s\+\w" && \
        echo "$gherkin_block" | grep -q "Given\s\+\w" && \
        echo "$gherkin_block" | grep -q "When\s\+\w" && \
        echo "$gherkin_block" | grep -q "Then\s\+\w"; then
-        # Reject generic/placeholder Gherkin
-        if echo "$gherkin_block" | grep -qiE "works as expected|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name"; then
+        # 2a: Reject generic/placeholder Gherkin (expanded pattern)
+        if echo "$gherkin_block" | grep -qiE "works as expected|works as specified|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct"; then
+            _gherkin_fail_reason="generic placeholders detected"
+        fi
+        # 2b: Require at least 2 scenarios (happy path + error/edge case)
+        local _scenario_count=$(echo "$gherkin_block" | grep -c "Scenario:")
+        if [ "$_scenario_count" -lt 2 ] && [ -z "$_gherkin_fail_reason" ]; then
+            _gherkin_fail_reason="only $_scenario_count scenario (need at least 2)"
+        fi
+        if [ -n "$_gherkin_fail_reason" ]; then
             has_gherkin=false
             all_criteria_met=false
-            dor_results+=("[ ] Gherkin scenarios are present and testable (generic placeholders detected)")
+            dor_results+=("[ ] Gherkin scenarios are present and testable ($_gherkin_fail_reason)")
         else
             has_gherkin=true
             dor_results+=("[x] Gherkin scenarios are present and testable")
@@ -655,6 +669,40 @@ judge_agent() {
         fi
     else
         dor_results+=("[x] No blocking questions remain")
+    fi
+
+    # Check 9: Cross-field duplicate detection
+    local _dup_check_pass=true
+    # Normalize: lowercase, strip list markers/whitespace, collapse
+    local _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _dup_count=0
+    if [ -n "$_norm_ctx" ]; then
+        [ "$_norm_ctx" = "$_norm_goal" ] && _dup_count=$((_dup_count + 1))
+        [ "$_norm_ctx" = "$_norm_req" ] && _dup_count=$((_dup_count + 1))
+        [ "$_norm_ctx" = "$_norm_scope" ] && _dup_count=$((_dup_count + 1))
+    fi
+    if [ "$_dup_count" -ge 2 ]; then
+        _dup_check_pass=false
+        all_criteria_met=false
+        dor_results+=("[ ] Fields contain distinct content (context duplicated in $_dup_count other fields)")
+    else
+        dor_results+=("[x] Fields contain distinct content")
+    fi
+
+    # Check 10: Minimum substance threshold (at least 4 substantive lines across context+goal+requirements)
+    local _substance_check_pass=true
+    local _substance_lines=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
+        grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification' | \
+        grep -c '[[:alnum:]]')
+    if [ "$_substance_lines" -lt 4 ]; then
+        _substance_check_pass=false
+        all_criteria_met=false
+        dor_results+=("[ ] Sufficient detail provided (only $_substance_lines substantive lines, need at least 4)")
+    else
+        dor_results+=("[x] Sufficient detail provided")
     fi
 
     # Update Definition of Ready checklist in spec.md
@@ -1220,6 +1268,223 @@ print(data.get('response', ''))
     return 0
 }
 
+# Spec Enrichment Agent - Expands thin spec fields using LLM, falls back to blocking questions
+# Returns: 0 = enriched or already rich, 1 = error, 2 = needs human info (questions written)
+spec_enrichment_agent() {
+    local ticket_dir="$1"
+    local spec_file="$ticket_dir/spec.md"
+    local questions_file="$ticket_dir/questions.md"
+
+    [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+
+    info "Running Spec Enrichment Agent..."
+
+    # Extract core fields
+    local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
+    local scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
+    local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
+
+    # Count substantive lines (reuse judge's logic)
+    local _enrich_substance=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
+        grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification|Part of project:|Project scope:' | \
+        grep -c '[[:alnum:]]')
+
+    # Check for cross-field duplication
+    local _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _enrich_dup=0
+    if [ -n "$_norm_ctx" ]; then
+        [ "$_norm_ctx" = "$_norm_goal" ] && _enrich_dup=$((_enrich_dup + 1))
+        [ "$_norm_ctx" = "$_norm_req" ] && _enrich_dup=$((_enrich_dup + 1))
+        [ "$_norm_ctx" = "$_norm_scope" ] && _enrich_dup=$((_enrich_dup + 1))
+    fi
+
+    local _needs_enrichment=false
+    if [ "$_enrich_substance" -lt 4 ]; then
+        info "Thin spec detected ($_enrich_substance substantive lines, need 4+)"
+        _needs_enrichment=true
+    fi
+    if [ "$_enrich_dup" -ge 2 ]; then
+        info "Duplicate fields detected (context matches $_enrich_dup other fields)"
+        _needs_enrichment=true
+    fi
+
+    if [ "$_needs_enrichment" = false ]; then
+        success "Spec fields already have sufficient distinct content"
+        return 0
+    fi
+
+    # --- Try LLM expansion ---
+    info "Attempting LLM expansion of thin fields..."
+
+    local expand_prompt="You are a senior Business Analyst expanding a thin software specification into a proper one.
+
+CURRENT SPEC (thin/incomplete):
+Title: ${title}
+Context: ${context}
+Goal: ${goal}
+Requirements: ${requirements}
+In Scope: ${scope_in}
+
+The fields above are thin, duplicated, or placeholder text. Your job is to expand them into distinct, specific content based on reasonable inferences from the title and any real content present.
+
+RULES:
+1. Context: Explain WHY this work is needed (1-3 sentences). What problem exists? What's the current state?
+2. Goal: State WHAT must be true after implementation (1-2 sentences). Measurable outcomes.
+3. Requirements: List 3-5 specific, concrete requirements as bullet points. Each should be independently verifiable.
+4. In Scope: List 2-4 specific deliverables as bullet points.
+5. Each field MUST have DIFFERENT content — no copy-pasting between fields.
+6. Be specific to the title/topic — no generic software platitudes.
+7. If you genuinely cannot infer enough from the title, say INSUFFICIENT on its own line.
+
+OUTPUT FORMAT (use exactly these headers, no markdown fences):
+CONTEXT:
+<your expanded context>
+
+GOAL:
+<your expanded goal>
+
+REQUIREMENTS:
+<your expanded requirements as - bullet points>
+
+IN_SCOPE:
+<your expanded scope as - bullet points>"
+
+    local llm_response
+    llm_response=$(ollama_generate "$expand_prompt" 2>/dev/null) || {
+        warn "Ollama unavailable — cannot expand spec, generating questions instead"
+        _write_enrichment_questions "$title" "$context" "$questions_file"
+        return 2
+    }
+
+    if [ -z "$llm_response" ]; then
+        warn "Empty LLM response — generating questions instead"
+        _write_enrichment_questions "$title" "$context" "$questions_file"
+        return 2
+    fi
+
+    # Check if LLM said INSUFFICIENT
+    if echo "$llm_response" | grep -q "INSUFFICIENT"; then
+        warn "LLM could not expand spec (insufficient information) — generating questions"
+        _write_enrichment_questions "$title" "$context" "$questions_file"
+        return 2
+    fi
+
+    # Parse LLM response
+    local new_context=$(echo "$llm_response" | sed -n '/^CONTEXT:/,/^GOAL:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
+    local new_goal=$(echo "$llm_response" | sed -n '/^GOAL:/,/^REQUIREMENTS:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
+    local new_requirements=$(echo "$llm_response" | sed -n '/^REQUIREMENTS:/,/^IN_SCOPE:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
+    local new_scope_in=$(echo "$llm_response" | sed -n '/^IN_SCOPE:/,$p' | sed '1d' | sed '/^[[:space:]]*$/d')
+
+    # Validate expansion actually added substance
+    local _new_substance=$(printf '%s\n%s\n%s' "$new_context" "$new_goal" "$new_requirements" | \
+        grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|TODO|TBD|to be determined' | \
+        grep -c '[[:alnum:]]')
+
+    if [ "$_new_substance" -lt 4 ]; then
+        warn "LLM expansion still thin ($_new_substance lines) — generating questions"
+        _write_enrichment_questions "$title" "$context" "$questions_file"
+        return 2
+    fi
+
+    # Check expansion doesn't have duplicates
+    local _new_norm_ctx=$(echo "$new_context" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _new_norm_goal=$(echo "$new_goal" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ "$_new_norm_ctx" = "$_new_norm_goal" ]; then
+        warn "LLM expansion produced duplicate fields — generating questions"
+        _write_enrichment_questions "$title" "$context" "$questions_file"
+        return 2
+    fi
+
+    # Apply expanded fields to spec.md using awk
+    # Update Context
+    if [ -n "$new_context" ]; then
+        _replace_spec_section "$spec_file" "## Context" "$new_context"
+    fi
+    # Update Goal
+    if [ -n "$new_goal" ]; then
+        _replace_spec_section "$spec_file" "## Goal" "$new_goal"
+    fi
+    # Update Requirements
+    if [ -n "$new_requirements" ]; then
+        _replace_spec_section "$spec_file" "## Requirements" "$new_requirements"
+    fi
+    # Update In Scope
+    if [ -n "$new_scope_in" ]; then
+        local temp_scope=$(mktemp)
+        printf '%s\n' "### In scope" "$new_scope_in" > "$temp_scope"
+        awk -v replacement="$temp_scope" '
+            /^### In scope/ {
+                system("cat " replacement)
+                in_section = 1
+                next
+            }
+            /^###|^## / && in_section {
+                in_section = 0
+            }
+            !in_section { print }
+        ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
+        rm -f "$temp_scope"
+    fi
+
+    success "Spec fields expanded by LLM (${OLLAMA_MODEL})"
+    return 0
+}
+
+# Helper: replace a ## section's content in spec.md
+_replace_spec_section() {
+    local file="$1"
+    local header="$2"
+    local content="$3"
+    local temp_content=$(mktemp)
+    printf '%s\n%s\n' "$header" "$content" > "$temp_content"
+    # Match header exactly or with trailing text (e.g. "## Requirements (Raw, BA input)")
+    local escaped_header=$(echo "$header" | sed 's/[[\.*^$()+?{|]/\\&/g')
+    awk -v header_re="^${escaped_header}" -v replacement="$temp_content" '
+        $0 ~ header_re {
+            system("cat " replacement)
+            in_section = 1
+            next
+        }
+        /^## / && in_section {
+            in_section = 0
+        }
+        !in_section { print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    rm -f "$temp_content"
+}
+
+# Helper: write blocking questions when enrichment fails
+_write_enrichment_questions() {
+    local title="$1"
+    local context="$2"
+    local questions_file="$3"
+
+    cat > "$questions_file" <<QEOF
+# Questions (Human in the loop)
+
+## Blocking questions
+
+1) Question: What specific problem does "${title}" solve? What is the current state that needs to change?
+   Answer:
+
+2) Question: What are the concrete requirements for "${title}"? List at least 3 specific, verifiable conditions.
+   Answer:
+
+3) Question: What should be in scope vs out of scope for this work? Be specific about deliverables.
+   Answer:
+
+## Notes
+- The spec fields were too thin or duplicated for the pipeline to refine automatically
+- Please provide distinct answers — context (why), goal (what), requirements (how to verify)
+QEOF
+    warn "Blocking questions written — ticket needs human input"
+}
+
 # BA Translator Agent - Uses local LLM to generate concrete Gherkin from spec
 ba_translator_agent() {
     local ticket_dir="$1"
@@ -1232,7 +1497,7 @@ ba_translator_agent() {
     # Check if Gherkin already has substantive content (not placeholder)
     local gherkin_block=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$gherkin_block" | grep -q "Scenario:" && \
-       ! echo "$gherkin_block" | grep -qiE "works as specified|works as expected|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO.*needs clarification"; then
+       ! echo "$gherkin_block" | grep -qiE "works as specified|works as expected|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct"; then
         success "Gherkin scenarios already contain substantive content - preserving"
         return 0
     fi
@@ -1258,6 +1523,23 @@ ba_translator_agent() {
     if [ "$_has_substance" = false ]; then
         warn "No context, goal, or requirements filled in — skipping Gherkin generation"
         warn "Fill in the spec sections first, then re-run refine"
+        return 1
+    fi
+
+    # Check for duplicate fields — if context is copy-pasted everywhere, skip LLM call
+    local _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _ba_dup_count=0
+    if [ -n "$_norm_ctx" ]; then
+        [ "$_norm_ctx" = "$_norm_goal" ] && _ba_dup_count=$((_ba_dup_count + 1))
+        [ "$_norm_ctx" = "$_norm_req" ] && _ba_dup_count=$((_ba_dup_count + 1))
+        [ "$_norm_ctx" = "$_norm_scope" ] && _ba_dup_count=$((_ba_dup_count + 1))
+    fi
+    if [ "$_ba_dup_count" -ge 2 ]; then
+        warn "Duplicate content across spec fields (context matches $_ba_dup_count other fields) — skipping Gherkin generation"
+        warn "Provide distinct context, goal, and requirements before re-running refine"
         return 1
     fi
 
@@ -1374,7 +1656,7 @@ else:
     fi
 
     # Final safety check: reject if LLM produced placeholder-like content
-    if echo "$clean_gherkin" | grep -qiE "works as specified|works as expected|the feature is used|expected behavior occurs"; then
+    if echo "$clean_gherkin" | grep -qiE "works as specified|works as expected|the feature is used|expected behavior occurs|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct"; then
         warn "LLM produced placeholder-like Gherkin — keeping existing"
         return 1
     fi
@@ -1953,7 +2235,17 @@ QUES_EOF
 
     # Run agents in pipeline order (using temporary files)
     # Agents will update the spec file in place
-    # BA Translator runs FIRST so downstream agents analyze real Gherkin
+
+    # Run Spec Enrichment Agent FIRST — expand thin fields before other agents
+    info "Running Spec Enrichment Agent..."
+    local enrich_result=0
+    spec_enrichment_agent "$temp_dir" || enrich_result=$?
+    if [ $enrich_result -eq 0 ]; then
+        success "Spec Enrichment Agent completed"
+    elif [ $enrich_result -eq 2 ]; then
+        warn "Spec too thin for automatic enrichment — needs human input"
+    fi
+    echo ""
 
     # Run BA Translator Agent (LLM-powered Gherkin generation)
     info "Running BA Translator Agent..."
