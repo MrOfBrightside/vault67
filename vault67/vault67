@@ -1919,6 +1919,27 @@ test_strategy_agent() {
         fi
     fi
 
+    # --- Step 1b: Detect frontend presence ---
+    local _has_frontend=false
+
+    # Check 1: Architecture section in spec (already filled by arch agent)
+    local arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    local detected_stack_info=$(echo "$arch_section" | grep "^- \(Tech stack\|Detected stack\):" | sed 's/^- [^:]*:[[:space:]]*//')
+
+    if echo "$detected_stack_info" | grep -qiE "React|Vue|Angular|Svelte|Next\.?js|Nuxt|frontend"; then
+        _has_frontend=true
+    fi
+
+    # Check 2: Repo directory structure (if accessible)
+    if [ "$_has_frontend" = false ] && [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
+        for fe_dir in frontend src/components src/pages src/app public/index.html; do
+            if [ -e "$repo_path/$fe_dir" ]; then
+                _has_frontend=true
+                break
+            fi
+        done
+    fi
+
     # --- Step 2: Determine test layers from Gherkin keywords ---
     local layers_unit=""
     local layers_integration=""
@@ -1966,11 +1987,21 @@ test_strategy_agent() {
                                 fi
                                 ;;
                             e2e)
-                                if [ -z "$layers_e2e" ]; then
-                                    layers_e2e="$framework"
-                                    layer_details_e2e="$description"
-                                elif ! echo "$layer_details_e2e" | grep -q "$description"; then
-                                    layer_details_e2e="$layer_details_e2e, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}')"
+                                if [ "$_has_frontend" = false ]; then
+                                    # Downgrade: no frontend in repo, e2e makes no sense
+                                    if [ -z "$layers_integration" ]; then
+                                        layers_integration="${framework}"
+                                        layer_details_integration="${description} (downgraded from e2e — no frontend detected)"
+                                    elif ! echo "$layer_details_integration" | grep -q "$description"; then
+                                        layer_details_integration="$layer_details_integration, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}') (downgraded from e2e)"
+                                    fi
+                                else
+                                    if [ -z "$layers_e2e" ]; then
+                                        layers_e2e="$framework"
+                                        layer_details_e2e="$description"
+                                    elif ! echo "$layer_details_e2e" | grep -q "$description"; then
+                                        layer_details_e2e="$layer_details_e2e, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}')"
+                                    fi
                                 fi
                                 ;;
                         esac
@@ -2058,6 +2089,14 @@ test_strategy_agent() {
     # --- Step 6: LLM enhancement (optional) ---
     local llm_scenario_mapping=""
     if [ "$scenario_count" -gt 0 ] 2>/dev/null && [ -n "$scenario_names" ]; then
+        local frontend_note=""
+        if [ "$_has_frontend" = false ]; then
+            frontend_note="
+PROJECT NOTE: This project has NO frontend (no React/Vue/Angular/Svelte detected, no frontend/ directory).
+Do NOT assign e2e layer. Downgrade UI-related scenarios to integration or unit.
+"
+        fi
+
         local prompt="You are a test strategy advisor. Given these Gherkin scenarios and the detected test layers, map each scenario to a specific test layer, framework, and suggested file location.
 
 GHERKIN SCENARIOS:
@@ -2067,7 +2106,7 @@ DETECTED TEST LAYERS:
 $(echo -e "$test_layers_section")
 
 REPO LANGUAGE MARKER: ${detected_marker:-unknown}
-
+${frontend_note}
 INSTRUCTIONS:
 For each Scenario, output EXACTLY one line in this markdown table format:
 | Scenario name | layer | framework | suggested file path |
@@ -2100,7 +2139,11 @@ Rules:
             # Guess layer from scenario name keywords
             local s_layer="unit" s_fw="${layers_unit:-pytest/jest}" s_loc="tests/"
             if echo "$scenario_name" | grep -qiE "UI|page|form|button|dashboard|click|display|render"; then
-                s_layer="e2e"; s_fw="${layers_e2e:-Playwright}"; s_loc="e2e/"
+                if [ "$_has_frontend" = true ]; then
+                    s_layer="e2e"; s_fw="${layers_e2e:-Playwright}"; s_loc="e2e/"
+                else
+                    s_layer="integration"; s_fw="${layers_integration:-httpx/supertest}"; s_loc="tests/integration/"
+                fi
             elif echo "$scenario_name" | grep -qiE "api|endpoint|route|login|auth|database|query|email|webhook|file|upload|download"; then
                 s_layer="integration"; s_fw="${layers_integration:-httpx/supertest}"; s_loc="tests/integration/"
             fi

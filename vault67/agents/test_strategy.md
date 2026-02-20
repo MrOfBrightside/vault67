@@ -18,6 +18,8 @@
 - Dockerfile: docker compose build | docker compose run --rm app pytest
 
 ## Test layers
+# Note: e2e layer requires frontend presence (React/Vue/Angular/Svelte or frontend/ dir).
+# If no frontend detected, e2e keywords are downgraded to integration.
 # Format: keyword: layer | framework | description
 - api,endpoint,route,REST,GraphQL: integration | httpx/supertest | Test API endpoints with request/response validation
 - login,auth,session,JWT,OAuth: integration | httpx/supertest | Test auth flows end-to-end
