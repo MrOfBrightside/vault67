@@ -410,6 +410,12 @@ Feature: <feature name>
 - Allowed paths:
 - Forbidden paths:
 
+## Code structure
+- Module pattern:
+- File conventions:
+- Import rules:
+- Notes:
+
 ## Security and compliance
 - Data classification:
 - AuthN/AuthZ:
@@ -508,6 +514,27 @@ bump_spec_version() {
     echo "$new_version"
 }
 
+# Helper: append a blocking question to the questions file
+_judge_add_question() {
+    local qfile="$1"
+    local question="$2"
+    if [ ! -f "$qfile" ]; then return; fi
+
+    # Count existing questions to get next number
+    local _qcount
+    _qcount=$(grep -cE "^[0-9]+\) Question:" "$qfile" 2>/dev/null) || _qcount=0
+    local next_num=$(( _qcount + 1 ))
+
+    # Insert before ## Notes line
+    local temp_qfile=$(mktemp)
+    awk -v num="$next_num" -v q="$question" '
+        /^## Notes/ {
+            printf "%d) Question: %s\n   Answer:\n\n", num, q
+        }
+        { print }
+    ' "$qfile" > "$temp_qfile" && mv "$temp_qfile" "$qfile"
+}
+
 # Judge Agent - Evaluates Definition of Ready
 judge_agent() {
     local spec_file="$1"
@@ -529,25 +556,17 @@ judge_agent() {
     local goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
     local requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
 
-    # Check 1: Scope in/out defined (reject placeholders)
+    # Check 1: Scope defined (in-scope required, out-of-scope is optional)
     local has_scope=false
     local scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
-    local scope_out=$(echo "$spec_content" | sed -n '/### Out of scope/,/## /p' | sed '1d;$d')
-    if echo "$scope_in" | grep -q -e "^-[[:space:]]*[^[:space:]]" && \
-       echo "$scope_out" | grep -q -e "^-[[:space:]]*[^[:space:]]"; then
-        # Reject generic placeholders
-        if echo "$scope_out" | grep -qiE "to be determined|TBD|TODO|not yet defined"; then
-            has_scope=false
-            all_criteria_met=false
-            dor_results+=("[ ] Scope in/out defined (out of scope is placeholder)")
-        else
-            has_scope=true
-            dor_results+=("[x] Scope in/out defined")
-        fi
+    if echo "$scope_in" | grep -q -e "^[-•*][[:space:]]*[^[:space:]]"; then
+        has_scope=true
+        dor_results+=("[x] Scope in/out defined")
     else
         has_scope=false
         all_criteria_met=false
         dor_results+=("[ ] Scope in/out defined")
+        _judge_add_question "$questions_file" "What is in scope for this work? Please list specific deliverables."
     fi
 
     # Check 2: Gherkin scenarios present, testable, and not generic placeholders
@@ -756,6 +775,170 @@ judge_agent() {
     fi
 }
 
+# Find local ticket directory for a Forgejo issue number
+# Searches ticket.md files for matching Issue link, or falls back to title match
+# Args: issue_number [issue_title]
+# Returns: ticket dir path on stdout, or empty string if not found
+find_ticket_dir_for_issue() {
+    local issue_number="$1"
+    local issue_title="${2:-}"
+
+    [ ! -d "$TICKETS_DIR" ] && return 1
+
+    # Search by Issue link in ticket.md
+    local dir
+    for dir in "$TICKETS_DIR"/TCK-*; do
+        [ ! -d "$dir" ] && continue
+        local tfile="$dir/ticket.md"
+        [ ! -f "$tfile" ] && continue
+        if grep -qE "^- Issue:.*[/#]${issue_number}([^0-9]|$)" "$tfile" 2>/dev/null; then
+            echo "$dir"
+            return 0
+        fi
+    done
+
+    # Fallback: match by title if provided
+    if [ -n "$issue_title" ]; then
+        for dir in "$TICKETS_DIR"/TCK-*; do
+            [ ! -d "$dir" ] && continue
+            local tfile="$dir/ticket.md"
+            [ ! -f "$tfile" ] && continue
+            if grep -qF "title: $issue_title" "$tfile" 2>/dev/null; then
+                echo "$dir"
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
+
+# Implementation status check
+# Detects whether implementation work already exists in the repo
+# Args: ticket_dir issue_number
+# Returns: 0=COMPLETE, 1=PARTIAL, 2=NOT_STARTED
+implementation_status_check() {
+    local ticket_dir="$1"
+    local issue_number="$2"
+
+    local repo_context="$ticket_dir/repo_context.md"
+    local spec_file="$ticket_dir/spec.md"
+
+    [ ! -f "$repo_context" ] && return 2
+    [ ! -f "$spec_file" ] && return 2
+
+    # Extract repo path and base ref from repo_context.md
+    local repo_path
+    repo_path=$(grep -m1 '^- Path/URL:' "$repo_context" | sed 's/^- Path\/URL: *//')
+    local base_ref
+    base_ref=$(grep -m1 '^- Base ref:' "$repo_context" | sed 's/^- Base ref: *//')
+    base_ref="${base_ref:-main}"
+
+    # Extract golden test command
+    local test_cmd
+    test_cmd=$(sed -n '/^## How to test/,/^##/{/^- Command(s):/s/^- Command(s): *//p}' "$repo_context")
+
+    # Extract relevant paths
+    local relevant_folders
+    relevant_folders=$(sed -n '/^## Relevant code areas/,/^##/{/^- Likely folders/s/^- Likely folders\/modules: *//p}' "$repo_context")
+    local key_files
+    key_files=$(sed -n '/^## Relevant code areas/,/^##/{/^- Key files/s/^- Key files (if known): *//p}' "$repo_context")
+
+    # Extract test file locations from spec.md scenario mapping
+    local test_locations
+    test_locations=$(sed -n '/Suggested location/s/.*Suggested location[^:]*: *//p' "$spec_file")
+
+    # If repo_path is not a local directory, return NOT_STARTED
+    if [ ! -d "$repo_path" ]; then
+        echo "repo_path=$repo_path (not local)"
+        echo "verdict=NOT_STARTED"
+        return 2
+    fi
+
+    # --- Signal detection ---
+    local sig_diff=0
+    local sig_test_files=0
+    local sig_branch=0
+    local sig_test_pass=0
+
+    # Signal 1: diff - files changed in relevant paths vs base_ref
+    local changed_files
+    changed_files=$(cd "$repo_path" && {
+        git diff --name-only "$base_ref"...HEAD 2>/dev/null || true
+        git diff --name-only 2>/dev/null || true
+        git diff --name-only --cached 2>/dev/null || true
+    } | sort -u)
+
+    if [ -n "$changed_files" ] && [ -n "$relevant_folders$key_files" ]; then
+        # Check if any changed file matches relevant paths
+        local path
+        local IFS=','
+        for path in $relevant_folders $key_files; do
+            path=$(echo "$path" | xargs)  # trim whitespace
+            [ -z "$path" ] && continue
+            if echo "$changed_files" | grep -q "$path"; then
+                sig_diff=1
+                break
+            fi
+        done
+        unset IFS
+    elif [ -n "$changed_files" ]; then
+        # No relevant paths defined but there are changes - count as diff
+        sig_diff=1
+    fi
+
+    # Signal 2: test_files - suggested test locations exist
+    if [ -n "$test_locations" ]; then
+        local loc
+        while IFS= read -r loc; do
+            loc=$(echo "$loc" | xargs)
+            [ -z "$loc" ] && continue
+            # Check if any file matching the pattern exists
+            if [ -e "$repo_path/$loc" ] || ls "$repo_path"/$loc 2>/dev/null | head -1 | grep -q .; then
+                sig_test_files=1
+                break
+            fi
+        done <<< "$test_locations"
+    fi
+
+    # Signal 3: branch - branch matching issue number exists
+    if (cd "$repo_path" && git branch -a 2>/dev/null | grep -qE "[-/_]${issue_number}([^0-9]|$)"); then
+        sig_branch=1
+    fi
+
+    # Signal 4: test_pass - golden test command exits 0 (only if diff fired)
+    if [ "$sig_diff" -eq 1 ] && [ -n "$test_cmd" ]; then
+        if (cd "$repo_path" && timeout 120 bash -c "$test_cmd" >/dev/null 2>&1); then
+            sig_test_pass=1
+        fi
+    fi
+
+    # --- Report ---
+    local total=$((sig_diff + sig_test_files + sig_branch + sig_test_pass))
+
+    echo "repo=$repo_path  base_ref=$base_ref"
+    echo "signals: diff=$sig_diff test_files=$sig_test_files branch=$sig_branch test_pass=$sig_test_pass (total=$total)"
+
+    # --- Verdict ---
+    # COMPLETE = diff + (test_pass OR no golden test command)
+    if [ "$sig_diff" -eq 1 ]; then
+        if [ "$sig_test_pass" -eq 1 ] || [ -z "$test_cmd" ]; then
+            echo "verdict=COMPLETE"
+            return 0
+        fi
+    fi
+
+    # PARTIAL = any signal >= 1 but not COMPLETE
+    if [ "$total" -ge 1 ]; then
+        echo "verdict=PARTIAL"
+        return 1
+    fi
+
+    # NOT_STARTED
+    echo "verdict=NOT_STARTED"
+    return 2
+}
+
 # Generate promptpack.md from spec.md
 generate_promptpack() {
     local spec_file="$1"
@@ -777,6 +960,7 @@ generate_promptpack() {
     local scope_out=$(sed -n '/^### Out of scope$/,/^##/p' "$spec_file" | sed '1d;$d')
     local gherkin=$(sed -n '/^## Acceptance Criteria (Gherkin)$/,/^##/p' "$spec_file" | sed '1d;$d')
     local architecture=$(sed -n '/^## Architecture alignment$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local code_structure=$(sed -n '/^## Code structure$/,/^##/p' "$spec_file" | sed '1d;$d')
     local security=$(sed -n '/^## Security and compliance$/,/^##/p' "$spec_file" | sed '1d;$d')
     local test_strategy=$(sed -n '/^## Test strategy$/,/^##/p' "$spec_file" | sed '1d;$d')
 
@@ -807,6 +991,9 @@ $gherkin
 ## Constraints and guardrails
 ### Architecture alignment
 $architecture
+
+### Code structure guidance
+$code_structure
 
 ### Security/compliance constraints
 $security
@@ -1048,6 +1235,230 @@ architecture_compliance_agent() {
         success "Architecture section updated (repo inspected)"
     else
         success "Architecture section updated (repo not accessible — defaults only)"
+    fi
+    return 0
+}
+
+# Lead Developer Agent - Code structure guidance
+lead_developer_agent() {
+    local ticket_dir="$1"
+    local spec_file="$ticket_dir/spec.md"
+    local repo_context_file="$ticket_dir/repo_context.md"
+    local rules_file="$SCRIPT_DIR/agents/lead_developer.md"
+
+    [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+    [ ! -f "$repo_context_file" ] && error "repo_context.md not found: $repo_context_file"
+
+    info "Analyzing code structure..."
+
+    # Check if code structure section already has substantive content
+    local existing_cs=$(sed -n '/^## Code structure/,/^## /p' "$spec_file" | sed '1d;$d')
+    if echo "$existing_cs" | grep -q -e "- Module pattern:[[:space:]]*[^[:space:]]"; then
+        success "Code structure section already filled in - preserving"
+        return 0
+    fi
+
+    # Helper to read a section from a markdown file
+    _read_ld_section() {
+        local section="$1" file="$2"
+        awk "/^## ${section}\$/{found=1;next} /^## /{if(found)exit} found && !/^#/ && !/^[[:space:]]*\$/{print}" "$file" 2>/dev/null
+    }
+
+    # Get repo path
+    local repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
+
+    # --- Step 1: Get detected stack from architecture section ---
+    local arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    local detected_stack=$(echo "$arch_section" | grep "^- Detected stack:" | sed 's/^- Detected stack:[[:space:]]*//')
+
+    # --- Step 2: Detect monolith files ---
+    local monolith_warnings=""
+    local monolith_threshold=500
+    if [ -f "$rules_file" ]; then
+        local _thresh=$(_read_ld_section "Monolith detection" "$rules_file" | grep "threshold:" | sed 's/.*threshold:[[:space:]]*//')
+        [ -n "$_thresh" ] && monolith_threshold="$_thresh"
+    fi
+
+    if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
+        # Find source files exceeding threshold (skip hidden dirs, node_modules, vendor, etc.)
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            local lc=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+            if [ "$lc" -gt "$monolith_threshold" ] 2>/dev/null; then
+                local relpath=$(echo "$f" | sed "s|^${repo_path}/||")
+                monolith_warnings="${monolith_warnings}${monolith_warnings:+; }${relpath} (${lc} lines)"
+            fi
+        done < <(find "$repo_path" -maxdepth 3 -type f \
+            \( -name "*.sh" -o -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" \
+               -o -name "*.rs" -o -name "*.rb" -o -name "*.java" -o -name "*.c" -o -name "*.cpp" \) \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/vendor/*" \
+            -not -path "*/dist/*" -not -path "*/build/*" -not -path "*/__pycache__/*" 2>/dev/null)
+    fi
+
+    # --- Step 3: Match language marker against rules file ---
+    local module_pattern=""
+    local file_naming=""
+    local import_rules=""
+    local max_file_length=""
+    local matched_marker=""
+
+    if [ -f "$rules_file" ] && [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
+        # Try each marker in Module patterns section
+        local in_section=false
+        while IFS= read -r line; do
+            case "$line" in
+                "## Module patterns"*) in_section=true; continue ;;
+                "## "*) [ "$in_section" = true ] && break; continue ;;
+                "#"*|"") continue ;;
+            esac
+            if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
+                local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                if [ -f "$repo_path/$marker" ]; then
+                    matched_marker="$marker"
+                    module_pattern=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+                    break
+                fi
+            fi
+        done < "$rules_file"
+
+        # Look up file naming for matched marker
+        if [ -n "$matched_marker" ]; then
+            in_section=false
+            while IFS= read -r line; do
+                case "$line" in
+                    "## File naming"*) in_section=true; continue ;;
+                    "## "*) [ "$in_section" = true ] && break; continue ;;
+                    "#"*|"") continue ;;
+                esac
+                if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
+                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    if [ "$marker" = "$matched_marker" ]; then
+                        file_naming=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+                        break
+                    fi
+                fi
+            done < "$rules_file"
+
+            # Look up import rules
+            in_section=false
+            while IFS= read -r line; do
+                case "$line" in
+                    "## Import rules"*) in_section=true; continue ;;
+                    "## "*) [ "$in_section" = true ] && break; continue ;;
+                    "#"*|"") continue ;;
+                esac
+                if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
+                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    if [ "$marker" = "$matched_marker" ]; then
+                        import_rules=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+                        break
+                    fi
+                fi
+            done < "$rules_file"
+
+            # Look up max file length
+            in_section=false
+            while IFS= read -r line; do
+                case "$line" in
+                    "## Max file length"*) in_section=true; continue ;;
+                    "## "*) [ "$in_section" = true ] && break; continue ;;
+                    "#"*|"") continue ;;
+                esac
+                if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
+                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    if [ "$marker" = "$matched_marker" ]; then
+                        max_file_length=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+                        break
+                    fi
+                fi
+            done < "$rules_file"
+        fi
+    fi
+
+    # --- Step 4: Load per-project config ---
+    local project_config=""
+    if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
+        for cfg in "$repo_path/CODE_STRUCTURE.md" "$repo_path/.vault67/code_structure.md"; do
+            if [ -f "$cfg" ]; then
+                project_config="$cfg"
+                break
+            fi
+        done
+    fi
+
+    local project_notes=""
+    if [ -n "$project_config" ]; then
+        info "Found project code structure config: ${project_config}"
+        project_notes=$(_read_ld_section "Notes" "$project_config")
+    fi
+
+    # --- Step 5: Build output ---
+    local temp_cs=$(mktemp)
+    {
+        echo "## Code structure"
+        if [ -n "$module_pattern" ]; then
+            echo "- Module pattern: ${module_pattern}"
+        else
+            echo "- Module pattern: Not detected (no recognized language marker found)"
+        fi
+        if [ -n "$file_naming" ]; then
+            echo "- File conventions: ${file_naming}"
+        else
+            echo "- File conventions:"
+        fi
+        if [ -n "$import_rules" ]; then
+            echo "- Import rules: ${import_rules}"
+        else
+            echo "- Import rules:"
+        fi
+        if [ -n "$max_file_length" ]; then
+            echo "- Max file length: ${max_file_length} lines"
+        fi
+        if [ -n "$monolith_warnings" ]; then
+            echo "- Monolith warnings: ${monolith_warnings} (exceeds ${monolith_threshold}-line threshold)"
+        fi
+        if [ -n "$project_notes" ]; then
+            echo "- Notes: ${project_notes}"
+        else
+            echo "- Notes:"
+        fi
+        echo ""
+    } > "$temp_cs"
+
+    # Check if ## Code structure section exists in spec
+    if grep -q "^## Code structure" "$spec_file"; then
+        # Replace existing section
+        awk '
+            /^## Code structure/ {
+                system("cat '"$temp_cs"'")
+                in_section = 1
+                next
+            }
+            /^## / && in_section {
+                in_section = 0
+            }
+            !in_section { print }
+        ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
+    else
+        # Insert new section after ## Architecture alignment (before ## Security)
+        awk '
+            /^## Security and compliance/ {
+                system("cat '"$temp_cs"'")
+            }
+            { print }
+        ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
+    fi
+
+    rm -f "$temp_cs"
+    if [ -n "$monolith_warnings" ]; then
+        warn "Monolith detected: ${monolith_warnings}"
+    fi
+    if [ -n "$project_config" ]; then
+        success "Code structure section updated (repo inspected + project config)"
+    elif [ -n "$module_pattern" ]; then
+        success "Code structure section updated (repo inspected)"
+    else
+        success "Code structure section updated (defaults only)"
     fi
     return 0
 }
@@ -2308,6 +2719,15 @@ QUES_EOF
     fi
     echo ""
 
+    # Run Lead Developer Agent (code structure guidance)
+    info "Running Lead Developer Agent..."
+    if lead_developer_agent "$temp_dir"; then
+        success "Lead Developer Agent completed"
+    else
+        warn "Lead Developer Agent reported issues (continuing to Judge)"
+    fi
+    echo ""
+
     # Run Security & Compliance Agent
     info "Running Security & Compliance Agent..."
     if security_compliance_agent "$temp_dir"; then
@@ -2504,6 +2924,7 @@ Run: \`vault67 refine ${issue_number}\`"
 cmd_implement() {
     local issue_number=""
     local executor="gastown"
+    local force=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -2511,6 +2932,10 @@ cmd_implement() {
             --executor)
                 executor="$2"
                 shift 2
+                ;;
+            --force|-f)
+                force=true
+                shift
                 ;;
             -*)
                 error "Unknown option: $1"
@@ -2533,17 +2958,55 @@ cmd_implement() {
     require_api_config
 
     info "Fetching issue #${issue_number} from Forgejo..."
-    
+
     # Get issue from API
     local api_response=$(api_get_issue "$issue_number")
     local issue_title=$(echo "$api_response" | python3 -c "import sys, json; print(json.load(sys.stdin)['title'])")
     local current_labels=$(echo "$api_response" | extract_issue_labels)
-    
+
     info "Current labels: ${current_labels}"
 
     # Check if issue is in READY_TO_IMPLEMENT state
     if ! echo "$current_labels" | grep -q "state:READY_TO_IMPLEMENT"; then
         error "Issue must be in state:READY_TO_IMPLEMENT (current: ${current_labels})"
+    fi
+
+    # Implementation status check — detect if work already exists
+    local ticket_dir
+    ticket_dir=$(find_ticket_dir_for_issue "$issue_number" "$issue_title" 2>/dev/null) || true
+
+    if [ -n "$ticket_dir" ] && [ -d "$ticket_dir" ]; then
+        info "Checking for existing implementation..."
+        local check_output
+        local check_rc=0
+        check_output=$(implementation_status_check "$ticket_dir" "$issue_number") || check_rc=$?
+
+        echo "$check_output" | while IFS= read -r line; do echo "  $line"; done
+
+        if [ "$check_rc" -eq 0 ]; then
+            # COMPLETE
+            if [ "$force" = true ]; then
+                warn "Implementation appears COMPLETE but --force specified, continuing..."
+            else
+                success "Implementation appears COMPLETE"
+                echo ""
+                info "To mark done:    vault67 done $issue_number"
+                info "To force handoff: vault67 implement $issue_number --force"
+                return 0
+            fi
+        elif [ "$check_rc" -eq 1 ]; then
+            # PARTIAL
+            if [ "$force" = true ]; then
+                warn "Implementation appears PARTIAL but --force specified, continuing..."
+            else
+                warn "Implementation appears PARTIAL (some signals detected)"
+                echo ""
+                info "Review with:      vault67 check $issue_number"
+                info "To force handoff: vault67 implement $issue_number --force"
+                return 0
+            fi
+        fi
+        # check_rc == 2 (NOT_STARTED) → normal handoff
     fi
 
     # Update label to IMPLEMENTING
@@ -2710,6 +3173,12 @@ Feature: ${issue_title}
 - Constraints:
 - Allowed paths:
 - Forbidden paths:
+
+## Code structure
+- Module pattern:
+- File conventions:
+- Import rules:
+- Notes:
 
 ## Security and compliance
 - Data classification:
@@ -2889,6 +3358,12 @@ Feature: ${issue_title}
 - Constraints:
 - Allowed paths:
 - Forbidden paths:
+
+## Code structure
+- Module pattern:
+- File conventions:
+- Import rules:
+- Notes:
 
 ## Security and compliance
 - Data classification:
@@ -3516,6 +3991,60 @@ _deps_check() {
     return $result
 }
 
+# Check command - detect existing implementation without changing state
+cmd_check() {
+    local issue_number=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            [0-9]*) issue_number="$1"; shift ;;
+            *) error "Usage: vault67 check <issue-number>" ;;
+        esac
+    done
+
+    [ -z "$issue_number" ] && error "Usage: vault67 check <issue-number>"
+
+    # Try to find local ticket dir
+    local ticket_dir=""
+    local issue_title=""
+
+    # If API is configured, fetch title for better matching
+    if [ -n "${FORGEJO_TOKEN:-}" ]; then
+        load_config
+        local api_response
+        api_response=$(api_get_issue "$issue_number" 2>/dev/null) || true
+        if [ -n "$api_response" ]; then
+            issue_title=$(echo "$api_response" | python3 -c "import sys, json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null) || true
+        fi
+    fi
+
+    ticket_dir=$(find_ticket_dir_for_issue "$issue_number" "$issue_title" 2>/dev/null) || true
+
+    if [ -z "$ticket_dir" ] || [ ! -d "$ticket_dir" ]; then
+        warn "No local ticket directory found for issue #${issue_number}"
+        info "Searched $TICKETS_DIR for Issue link or title match"
+        return 2
+    fi
+
+    info "Ticket dir: $ticket_dir"
+    echo ""
+
+    local check_output
+    local check_rc=0
+    check_output=$(implementation_status_check "$ticket_dir" "$issue_number") || check_rc=$?
+
+    echo "$check_output"
+    echo ""
+
+    case $check_rc in
+        0) success "Verdict: COMPLETE — implementation detected" ;;
+        1) warn "Verdict: PARTIAL — some implementation signals detected" ;;
+        2) info "Verdict: NOT_STARTED — no implementation detected" ;;
+    esac
+
+    return $check_rc
+}
+
 # Done command - mark issue as DONE, close it, report unblocked downstream
 cmd_done() {
     local issue_number=""
@@ -3750,7 +4279,8 @@ Usage:
   vault67 create --title "<title>" --repo "<path_or_url>" [--base-ref "main"]
   vault67 refine <issue-number>
   vault67 answer <issue-number>
-  vault67 implement <issue-number> [--executor gastown]
+  vault67 implement <issue-number> [--executor gastown] [--force]
+  vault67 check <issue-number>
   vault67 done <issue-number>
   vault67 delete <issue-number> [--force]
   vault67 translate <issue-number>
@@ -3769,6 +4299,7 @@ Commands:
   refine          Run multi-agent refinement pipeline on an issue
   answer          Mark blocking questions as answered (HITL)
   implement       Hand off issue to Gas Town for implementation
+  check           Check if implementation already exists for an issue
   done            Mark issue as DONE, close it, report unblocked issues
   delete          Close an issue (with confirmation)
   translate       Convert plain text issue to structured spec
@@ -3782,6 +4313,7 @@ Examples:
   vault67 refine 42
   vault67 answer 42
   vault67 implement 42
+  vault67 check 42            # Check if #42 is already implemented
   vault67 list
   vault67 list --all
   vault67 status 2
@@ -3812,6 +4344,9 @@ HELPEOF
             ;;
         implement)
             cmd_implement "$@"
+            ;;
+        check)
+            cmd_check "$@"
             ;;
         done)
             cmd_done "$@"
