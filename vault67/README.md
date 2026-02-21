@@ -1,176 +1,211 @@
-# Lead Developer Agent
+# vault67 CLI
 
-Automated code analysis tool for Python repositories. The Lead Developer Agent analyzes your codebase using multiple tools (AST analysis, Ruff, Mypy) and provides actionable recommendations.
+Multi-agent ticket refinement system integrated with Forgejo (Gitea-compatible API).
 
-## Features
+## Overview
 
-- **AST Analysis**: Detects code complexity, long functions, and code smells
-- **Ruff Integration**: Comprehensive linting for code quality and style
-- **Mypy Integration**: Static type checking for type safety
-- **Git Analysis**: Identifies code hot spots and large files
-- **JSON Output**: Structured findings and recommendations
+vault67 is a CLI tool that helps refine software development tickets through a multi-agent pipeline. It uses Forgejo issues as the backend, enabling better collaboration and tracking.
 
-## Installation
+## Quick Start
 
-```bash
-# Install from source
-cd vault67
-pip install -e .
+### 1. Configuration
 
-# Or install with development dependencies
-pip install -e ".[dev]"
-```
-
-## Usage
-
-### Basic Analysis
+Copy the example config file and add your Forgejo API token:
 
 ```bash
-lead-dev-agent analyze /path/to/repo
+cp .vault67.conf.example .vault67.conf
+# Edit .vault67.conf and add your FORGEJO_TOKEN
 ```
 
-### Save Results to File
+Get your API token from your Forgejo instance (Settings > Applications).
+
+### 2. Create an Issue
 
 ```bash
-lead-dev-agent analyze /path/to/repo --output results.json
+vault67 create --title "Add user authentication" --repo "/path/to/repo"
 ```
 
-### Skip Specific Analyzers
+This creates a new issue on Forgejo with the spec template as the body.
+
+### 3. Refine the Issue
+
+Edit the issue on Forgejo to fill in the specification sections, then:
 
 ```bash
-# Skip git analysis
-lead-dev-agent analyze /path/to/repo --skip-git
-
-# Skip mypy (type checking)
-lead-dev-agent analyze /path/to/repo --skip-mypy
-
-# Skip ruff (linting)
-lead-dev-agent analyze /path/to/repo --skip-ruff
-
-# Skip AST analysis
-lead-dev-agent analyze /path/to/repo --skip-ast
+vault67 refine <issue-number>
 ```
 
-### Adjust Complexity Threshold
+This runs the multi-agent refinement pipeline (Architecture, Security, Test Strategy, Judge agents) and updates labels based on readiness.
+
+### 4. Answer Questions (if needed)
+
+If the issue is marked as `state:NEEDS_INFO`, add answers as comments on Forgejo, then:
 
 ```bash
-# Set complexity threshold to 15 (default is 10)
-lead-dev-agent analyze /path/to/repo --complexity-threshold 15
+vault67 answer <issue-number>
 ```
 
-## Output Schema
+This transitions the issue back to `state:REFINING` so you can refine again.
 
-The tool outputs JSON with the following structure:
+### 5. Check Implementation Status
 
-```json
-{
-  "repo_path": "/path/to/repo",
-  "analysis_timestamp": "2026-02-21T17:00:00Z",
-  "summary": {
-    "total_files": 50,
-    "python_files": 45,
-    "total_findings": 120,
-    "findings_by_severity": {
-      "critical": 2,
-      "high": 15,
-      "medium": 45,
-      "low": 48,
-      "info": 10
-    },
-    "findings_by_type": {
-      "style": 30,
-      "type_error": 20,
-      "complexity": 15,
-      "code_smell": 25,
-      "bug": 10
-    },
-    "total_recommendations": 8
-  },
-  "findings": [
-    {
-      "type": "complexity",
-      "severity": "high",
-      "location": {
-        "file": "src/main.py",
-        "line": 42,
-        "column": 0,
-        "function": "process_data"
-      },
-      "message": "Function 'process_data' has high cyclomatic complexity (25)",
-      "rule_id": "AST100",
-      "fix_available": false
-    }
-  ],
-  "recommendations": [
-    {
-      "priority": "urgent",
-      "category": "Critical Issues",
-      "action": "Fix 2 critical issue(s) immediately",
-      "rationale": "Critical issues can cause runtime failures or security vulnerabilities",
-      "impact": "Prevents potential system failures and security breaches",
-      "effort": "medium"
-    }
-  ],
-  "git_metrics": {
-    "total_commits": 542,
-    "total_contributors": 8,
-    "hot_spots": ["src/main.py", "src/utils.py"],
-    "large_files": ["src/legacy.py (823 lines)"],
-    "last_commit_date": "2026-02-21T16:30:00Z"
-  }
-}
-```
-
-## Finding Types
-
-- **style**: Code style and formatting issues
-- **type_error**: Type checking errors (from mypy)
-- **complexity**: High cyclomatic complexity
-- **security**: Security vulnerabilities
-- **performance**: Performance issues
-- **maintainability**: Maintainability concerns
-- **bug**: Potential bugs
-- **code_smell**: Code smells and anti-patterns
-
-## Severity Levels
-
-- **critical**: Must be fixed immediately (syntax errors, critical bugs)
-- **high**: Should be fixed soon (bugs, important type errors)
-- **medium**: Should be addressed (style violations, moderate complexity)
-- **low**: Nice to fix (minor style issues, suggestions)
-- **info**: Informational only
-
-## Requirements
-
-- Python 3.10 or higher
-- Git (for git analysis)
-- Ruff (for linting)
-- Mypy (for type checking)
-
-## Development
-
-### Running Tests
+Before handing off, check if implementation already exists:
 
 ```bash
-pytest
+vault67 check <issue-number>
 ```
 
-### Type Checking
+### 6. Implement
+
+When the issue reaches `state:READY_TO_IMPLEMENT`:
 
 ```bash
-mypy src/vault67_agent
+vault67 implement <issue-number>
 ```
 
-### Linting
+This checks for existing implementation, updates the label to `state:IMPLEMENTING`, and adds a promptpack comment for Gas Town handoff. Use `--force` to bypass the implementation check.
+
+## State Labels
+
+Issues progress through these states (managed as Forgejo labels):
+
+- `state:NEW` - Just created, needs specification
+- `state:REFINING` - Being refined by agents
+- `state:NEEDS_INFO` - Blocked on questions, needs human input
+- `state:READY_TO_IMPLEMENT` - Refinement complete, ready for development
+- `state:IMPLEMENTING` - Handed off to Gas Town for implementation
+- `state:DONE` - Implementation complete
+
+## Configuration Options
+
+Set in `.vault67.conf` or as environment variables:
+
+- **FORGEJO_TOKEN** (required) - Your Forgejo API token
+- **FORGEJO_API** (optional) - API base URL (default: https://git.logikfabriken.se/api/v1)
+- **FORGEJO_REPO** (optional) - Target repo in format Owner/Repo (default: jesper/Vault67)
+
+## Architecture
+
+### API Integration
+
+All commands interact with the Forgejo API:
+
+- **create**: POST /repos/{owner}/{repo}/issues
+- **refine**: GET issue, run agent pipeline, PATCH issue body, update labels
+- **answer**: GET issue, check comments, update labels
+- **check**: Detect existing implementation via local repo signals
+- **implement**: GET issue, check status, update labels, add comment
+- **done**: Close issue, update labels, report unblocked downstream
+
+### Issue Body Structure
+
+Issues contain the full specification as markdown:
+
+- Metadata (repo, base ref, spec version)
+- Specification sections (context, goals, scope, etc.)
+- Acceptance criteria (Gherkin format)
+- Architecture alignment
+- Security and compliance requirements
+- Test strategy
+- Definition of Ready checklist
+
+### Local Files
+
+The `tickets/` directory is used as a local cache for repo context and spec files. The source of truth is the Forgejo issue.
+
+## Commands
+
+### create
+
+Create a new issue with spec template:
 
 ```bash
-ruff check src/vault67_agent
+vault67 create --title "Feature title" --repo "/path/to/repo" [--base-ref "main"]
 ```
 
-## License
+### refine
 
-MIT
+Run refinement pipeline on an issue:
+
+```bash
+vault67 refine <issue-number>
+```
+
+Runs Architecture, Security, Test Strategy, and Judge agents on the issue spec.
+
+### answer
+
+Mark questions as answered and resume refinement:
+
+```bash
+vault67 answer <issue-number>
+```
+
+### check
+
+Check if implementation already exists for an issue:
+
+```bash
+vault67 check <issue-number>
+```
+
+Reports signals: diff, test files, branch, test pass. Verdict: COMPLETE, PARTIAL, or NOT_STARTED.
+
+### implement
+
+Hand off to Gas Town for implementation:
+
+```bash
+vault67 implement <issue-number> [--executor gastown] [--force]
+```
+
+Gates on implementation status check. Use `--force` to bypass.
+
+### done
+
+Mark issue as complete:
+
+```bash
+vault67 done <issue-number>
+```
+
+### list
+
+List issues:
+
+```bash
+vault67 list [--all]
+```
+
+### status
+
+Show pipeline overview or single issue details:
+
+```bash
+vault67 status [issue-number]
+```
+
+### project
+
+Manage projects:
+
+```bash
+vault67 project create <name> <description>
+vault67 project run <name> <description>
+vault67 project list [--all]
+vault67 project status <milestone-id>
+```
+
+### deps
+
+Manage issue dependencies:
+
+```bash
+vault67 deps add <issue> <depends-on>
+vault67 deps remove <issue> <depends-on>
+vault67 deps show <issue>
+```
 
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request.
+This tool is part of the Gas Town ecosystem. See the main Gas Town documentation for contribution guidelines.
