@@ -58,13 +58,18 @@ QUESTIONS_FILE="$TICKET_DIR/questions.md"
 info "BA Translator Agent starting..."
 info "Ticket directory: $TICKET_DIR"
 
-# Extract raw requirements from spec.md
-extract_raw_requirements() {
-    local spec_file="$1"
+# Extract section from spec.md
+extract_section() {
+    local file="$1"
+    local section="$2"
 
-    # Extract everything from "## Requirements (Raw, BA input)" to the next ## heading
-    awk '
-        /^## Requirements \(Raw, BA input\)/ {
+    awk -v section="$section" '
+        BEGIN {
+            # Escape special regex characters in the section variable
+            gsub(/[()[\]{}.*+?^$|\\]/, "\\\\&", section)
+            pattern = "^## " section
+        }
+        $0 ~ pattern {
             found=1
             next
         }
@@ -74,42 +79,23 @@ extract_raw_requirements() {
         found {
             print
         }
-    ' "$spec_file"
+    ' "$file"
 }
 
-# Extract context and goal from spec.md
-extract_context_goal() {
-    local spec_file="$1"
-    local section="$2"
+# Read sections from spec.md
+RAW_REQUIREMENTS=$(extract_section "$SPEC_FILE" "Requirements (Raw, BA input)")
+CONTEXT=$(extract_section "$SPEC_FILE" "Context")
+GOAL=$(extract_section "$SPEC_FILE" "Goal")
+SCOPE=$(extract_section "$SPEC_FILE" "Scope")
 
-    awk -v section="## $section" '
-        $0 ~ section {
-            found=1
-            next
-        }
-        found && /^##/ {
-            exit
-        }
-        found && NF {
-            print
-        }
-    ' "$spec_file"
-}
-
-# Read raw requirements
-RAW_REQUIREMENTS=$(extract_raw_requirements "$SPEC_FILE")
-CONTEXT=$(extract_context_goal "$SPEC_FILE" "Context")
-GOAL=$(extract_context_goal "$SPEC_FILE" "Goal")
-
-# Check if requirements are empty
-if [ -z "$(echo "$RAW_REQUIREMENTS" | tr -d ' \n-')" ]; then
+# Check if requirements are empty or just placeholders
+if [ -z "$(echo "$RAW_REQUIREMENTS" | grep -v '^-$' | grep -v '^$' | tr -d ' \n')" ]; then
     warn "No raw requirements found in spec.md"
     warn "Adding blocking question to questions.md"
 
-    # Add blocking question
-    cat >> "$QUESTIONS_FILE" <<EOF
+    cat >> "$QUESTIONS_FILE" <<'EOF'
 
-## Blocking question (added by BA Translator Agent)
+## Blocking questions (added by BA Translator Agent)
 1) The "Requirements (Raw, BA input)" section in spec.md is empty or contains only placeholders. What are the actual requirements for this ticket?
    - Answer: [Please provide detailed requirements]
 EOF
@@ -123,23 +109,32 @@ REPO_CONTEXT=$(cat "$REPO_CONTEXT_FILE")
 
 info "Generating Gherkin scenarios from requirements..."
 
-# Create prompt for Claude to generate Gherkin scenarios
-PROMPT=$(cat <<EOF
+# Create prompt for Claude
+PROMPT=$(cat <<'EOF_PROMPT'
 You are a Business Analyst Translator Agent. Your job is to transform raw business requirements into clear, testable Gherkin acceptance criteria.
 
-# Context
-$CONTEXT
+# CONTEXT
 
-# Goal
-$GOAL
+CONTEXT_PLACEHOLDER
 
-# Raw Requirements (from BA)
-$RAW_REQUIREMENTS
+# GOAL
 
-# Repository Context
-$REPO_CONTEXT
+GOAL_PLACEHOLDER
 
-# Your Task
+# SCOPE
+
+SCOPE_PLACEHOLDER
+
+# RAW REQUIREMENTS (from BA)
+
+REQUIREMENTS_PLACEHOLDER
+
+# REPOSITORY CONTEXT
+
+REPO_CONTEXT_PLACEHOLDER
+
+# YOUR TASK
+
 Transform the raw requirements into precise Gherkin scenarios following this format:
 
 Feature: <clear feature name>
@@ -149,91 +144,117 @@ Feature: <clear feature name>
     When <action/trigger>
     Then <expected outcome>
 
-# Guidelines
+# GUIDELINES
+
 1. Create one or more scenarios that cover all the requirements
 2. Each scenario should be independently testable
 3. Use concrete examples rather than abstract descriptions
 4. Scenarios should be implementation-agnostic (describe WHAT, not HOW)
-5. If requirements are unclear, ambiguous, or incomplete, note specific questions
+5. Include Given-When-Then clauses for each scenario
+6. Use "And" to add additional conditions when needed
+7. If requirements are unclear or incomplete, you can still generate scenarios but note specific questions
 
-# Output Format
-Provide ONLY the Gherkin scenarios in your response, formatted exactly as shown above.
-If you have questions about unclear requirements, start your response with "QUESTIONS:" followed by numbered questions, then provide "SCENARIOS:" with your best interpretation.
+# OUTPUT FORMAT
+
+If you have questions about unclear requirements, provide them first in this format:
+
+QUESTIONS:
+1. [Specific question about requirement]
+2. [Another question if needed]
+
+SCENARIOS:
+
+Then provide the Gherkin scenarios (even if you have questions, provide your best interpretation).
+
+If requirements are clear, provide ONLY the Gherkin scenarios without any markdown code fences, explanatory text, or other formatting.
 
 Begin your response now:
-EOF
+EOF_PROMPT
 )
 
-# Create a temporary file for the prompt
-PROMPT_FILE=$(mktemp)
-echo "$PROMPT" > "$PROMPT_FILE"
+# Replace placeholders
+PROMPT="${PROMPT//CONTEXT_PLACEHOLDER/$CONTEXT}"
+PROMPT="${PROMPT//GOAL_PLACEHOLDER/$GOAL}"
+PROMPT="${PROMPT//SCOPE_PLACEHOLDER/$SCOPE}"
+PROMPT="${PROMPT//REQUIREMENTS_PLACEHOLDER/$RAW_REQUIREMENTS}"
+PROMPT="${PROMPT//REPO_CONTEXT_PLACEHOLDER/$REPO_CONTEXT}"
 
-# Try to use Claude Code's claude command if available
-if command -v claude &> /dev/null; then
-    info "Using Claude CLI to generate scenarios..."
-    RESPONSE=$(claude -p "$PROMPT_FILE" 2>/dev/null || echo "")
-else
-    # Fallback: create a marker file for manual processing
-    warn "Claude CLI not available"
-    warn "Creating prompt file for manual processing: $TICKET_DIR/ba-translator-prompt.txt"
-    cp "$PROMPT_FILE" "$TICKET_DIR/ba-translator-prompt.txt"
-    error "Please run Claude manually with the prompt file and update spec.md"
-fi
+# Call Claude CLI to generate Gherkin scenarios
+CLAUDE_RESPONSE=$(echo "$PROMPT" | claude -p --model sonnet 2>&1) || {
+    error "Claude CLI failed. Response: $CLAUDE_RESPONSE"
+}
 
-rm -f "$PROMPT_FILE"
-
-# Parse response for questions and scenarios
-if echo "$RESPONSE" | grep -q "^QUESTIONS:"; then
+# Check if response contains questions
+if echo "$CLAUDE_RESPONSE" | grep -q "^QUESTIONS:"; then
     info "Agent identified unclear requirements"
 
-    # Extract questions
-    QUESTIONS=$(echo "$RESPONSE" | awk '/^QUESTIONS:/,/^SCENARIOS:/ {print}' | grep -v "^QUESTIONS:" | grep -v "^SCENARIOS:")
+    # Extract questions (everything between QUESTIONS: and SCENARIOS:)
+    QUESTIONS=$(echo "$CLAUDE_RESPONSE" | awk '/^QUESTIONS:/,/^SCENARIOS:/ {print}' | grep -v "^QUESTIONS:" | grep -v "^SCENARIOS:" | sed '/^$/d')
 
     if [ -n "$QUESTIONS" ]; then
-        warn "Adding blocking questions to questions.md"
+        warn "Adding clarifying questions to questions.md"
         cat >> "$QUESTIONS_FILE" <<EOF
 
-## Blocking questions (added by BA Translator Agent)
+## Questions (added by BA Translator Agent)
 $QUESTIONS
 EOF
         success "Added questions to questions.md"
     fi
 
-    # Extract scenarios
-    SCENARIOS=$(echo "$RESPONSE" | awk '/^SCENARIOS:/,0 {print}' | grep -v "^SCENARIOS:")
+    # Extract scenarios (everything after SCENARIOS:)
+    SCENARIOS=$(echo "$CLAUDE_RESPONSE" | awk '/^SCENARIOS:/,0 {print}' | grep -v "^SCENARIOS:" | sed '/^$/d' | sed 's/^[[:space:]]*//')
 else
-    SCENARIOS="$RESPONSE"
+    # No questions section, entire response is scenarios
+    SCENARIOS="$CLAUDE_RESPONSE"
+fi
+
+# Clean up scenarios - remove markdown code fences if present
+SCENARIOS=$(echo "$SCENARIOS" | sed '/^```/d')
+
+# Validate that we got actual Gherkin scenarios
+if ! echo "$SCENARIOS" | grep -q "Feature:\|Scenario:"; then
+    error "Generated response does not contain valid Gherkin scenarios. Response: $SCENARIOS"
 fi
 
 # Update spec.md with generated scenarios
-if [ -n "$SCENARIOS" ]; then
-    info "Updating spec.md with generated scenarios..."
+info "Updating spec.md with generated scenarios..."
 
-    # Create a temporary file with the updated spec
-    TMP_SPEC=$(mktemp)
+# Find the line number where "## Acceptance Criteria (Gherkin)" starts
+START_LINE=$(grep -n "^## Acceptance Criteria (Gherkin)" "$SPEC_FILE" | cut -d: -f1)
 
-    # Replace the Acceptance Criteria section
-    awk -v scenarios="$SCENARIOS" '
-        /^## Acceptance Criteria \(Gherkin\)/ {
-            print
-            print ""
-            print scenarios
-            skip=1
-            next
-        }
-        skip && /^##/ {
-            skip=0
-        }
-        !skip {
-            print
-        }
-    ' "$SPEC_FILE" > "$TMP_SPEC"
-
-    # Replace the original file
-    mv "$TMP_SPEC" "$SPEC_FILE"
-    success "Updated Acceptance Criteria in spec.md"
-else
-    warn "No scenarios generated"
+if [ -z "$START_LINE" ]; then
+    # Try alternative header format
+    START_LINE=$(grep -n "^## Acceptance Criteria" "$SPEC_FILE" | cut -d: -f1)
 fi
 
+if [ -z "$START_LINE" ]; then
+    error "Could not find 'Acceptance Criteria' section in spec.md"
+fi
+
+# Find the next section after Acceptance Criteria (next line starting with ##)
+END_LINE=$(tail -n +$((START_LINE + 1)) "$SPEC_FILE" | grep -n "^## " | head -1 | cut -d: -f1)
+
+if [ -n "$END_LINE" ]; then
+    # Calculate actual line number
+    END_LINE=$((START_LINE + END_LINE))
+    # Replace the section
+    {
+        head -n "$START_LINE" "$SPEC_FILE"
+        echo "$SCENARIOS"
+        echo ""
+        tail -n +$END_LINE "$SPEC_FILE"
+    } > "$SPEC_FILE.tmp"
+else
+    # Acceptance Criteria section is at the end of file
+    {
+        head -n "$START_LINE" "$SPEC_FILE"
+        echo "$SCENARIOS"
+    } > "$SPEC_FILE.tmp"
+fi
+
+# Replace original file
+mv "$SPEC_FILE.tmp" "$SPEC_FILE"
+
+success "Updated Acceptance Criteria in spec.md"
 success "BA Translator Agent completed"
+exit 0
