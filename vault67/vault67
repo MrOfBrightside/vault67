@@ -1297,6 +1297,18 @@ QUES_EOF
     # Run agents in pipeline order (using temporary files)
     # Agents will update the spec file in place
 
+    # Run BA Translator Agent
+    local agents_dir="$SCRIPT_DIR/agents"
+    if [ -f "$agents_dir/ba-translator.sh" ]; then
+        info "Running BA Translator Agent..."
+        if "$agents_dir/ba-translator.sh" "$temp_dir" 2>&1; then
+            success "BA Translator Agent completed"
+        else
+            warn "BA Translator Agent reported issues (continuing to next agent)"
+        fi
+        echo ""
+    fi
+
     # Run Architecture Compliance Agent
     info "Running Architecture Compliance Agent..."
     if architecture_compliance_agent "$temp_dir"; then
@@ -1323,6 +1335,17 @@ QUES_EOF
             success "Test Strategy Agent completed"
         else
             warn "Test Strategy Agent reported issues (continuing to Judge)"
+        fi
+        echo ""
+    fi
+
+    # Run Engineering Principles Agent
+    if [ -f "$agents_dir/engineering_principles.sh" ]; then
+        info "Running Engineering Principles Agent..."
+        if "$agents_dir/engineering_principles.sh" "$temp_dir" 2>&1; then
+            success "Engineering Principles Agent completed"
+        else
+            warn "Engineering Principles Agent reported issues (continuing to Judge)"
         fi
         echo ""
     fi
