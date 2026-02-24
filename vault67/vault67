@@ -1652,7 +1652,7 @@ security_compliance_agent() {
 
         # Return default
         if [ -n "$default_section" ] && [ -f "$rules_file" ]; then
-            awk "/^## ${default_section}\$/{found=1;next} /^## /{if(found)exit} found&&NF{printf \"%s\",\$0}" "$rules_file"
+            awk -v hdr="## ${default_section}" 'index($0,hdr)==1{found=1;next} /^## /{if(found)exit} found&&NF{printf "%s",$0}' "$rules_file"
         fi
     }
 
@@ -1814,6 +1814,7 @@ spec_enrichment_agent() {
     local ticket_dir="$1"
     local spec_file="$ticket_dir/spec.md"
     local questions_file="$ticket_dir/questions.md"
+    local rules_file="$SCRIPT_DIR/agents/spec_enrichment.md"
 
     [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
 
@@ -1827,8 +1828,15 @@ spec_enrichment_agent() {
     local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
 
     # Count substantive lines (reuse judge's logic)
+    # Read placeholder patterns from rules file
+    local placeholder_pattern=""
+    if [ -f "$rules_file" ]; then
+        placeholder_pattern=$(awk '/^## Placeholder patterns$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file" | paste -sd '|' -)
+    fi
+    [ -z "$placeholder_pattern" ] && placeholder_pattern="^[[:space:]]*$|TODO|TBD|placeholder"
+
     local _enrich_substance=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
-        grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification|Part of project:|Project scope:' | \
+        grep -viE "$placeholder_pattern" | \
         grep -c '[[:alnum:]]')
 
     # Check for cross-field duplication
@@ -1844,7 +1852,14 @@ spec_enrichment_agent() {
     fi
 
     local _needs_enrichment=false
-    if [ "$_enrich_substance" -lt 4 ]; then
+    # Read substance threshold from rules file
+    local substance_threshold=4
+    if [ -f "$rules_file" ]; then
+        local _thresh=$(awk '/^## Substance threshold$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file" | head -1)
+        [ -n "$_thresh" ] && substance_threshold="$_thresh"
+    fi
+
+    if [ "$_enrich_substance" -lt "$substance_threshold" ]; then
         info "Thin spec detected ($_enrich_substance substantive lines, need 4+)"
         _needs_enrichment=true
     fi
@@ -1861,6 +1876,12 @@ spec_enrichment_agent() {
     # --- Try LLM expansion ---
     info "Attempting LLM expansion of thin fields..."
 
+    # Read prompt rules from rules file
+    local prompt_rules=""
+    if [ -f "$rules_file" ]; then
+        prompt_rules=$(awk '/^## Prompt rules$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file")
+    fi
+
     local expand_prompt="You are a senior Business Analyst expanding a thin software specification into a proper one.
 
 CURRENT SPEC (thin/incomplete):
@@ -1873,13 +1894,7 @@ In Scope: ${scope_in}
 The fields above are thin, duplicated, or placeholder text. Your job is to expand them into distinct, specific content based on reasonable inferences from the title and any real content present.
 
 RULES:
-1. Context: Explain WHY this work is needed (1-3 sentences). What problem exists? What's the current state?
-2. Goal: State WHAT must be true after implementation (1-2 sentences). Measurable outcomes.
-3. Requirements: List 3-5 specific, concrete requirements as bullet points. Each should be independently verifiable.
-4. In Scope: List 2-4 specific deliverables as bullet points.
-5. Each field MUST have DIFFERENT content — no copy-pasting between fields.
-6. Be specific to the title/topic — no generic software platitudes.
-7. If you genuinely cannot infer enough from the title, say INSUFFICIENT on its own line.
+${prompt_rules}
 
 OUTPUT FORMAT (use exactly these headers, no markdown fences):
 CONTEXT:
@@ -2034,10 +2049,23 @@ ba_translator_agent() {
 
     info "Running BA Translator Agent (LLM-powered)..."
 
+    # Load reject patterns and prompt rules from external config
+    local rules_file="$SCRIPT_DIR/agents/ba_translator.md"
+    local reject_pattern=""
+    if [ -f "$rules_file" ]; then
+        reject_pattern=$(awk '/^## Reject patterns$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file" | head -1)
+    fi
+    [ -z "$reject_pattern" ] && reject_pattern="works as specified|TODO|TBD|placeholder"
+
+    local prompt_rules=""
+    if [ -f "$rules_file" ]; then
+        prompt_rules=$(awk '/^## Prompt rules$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file")
+    fi
+
     # Check if Gherkin already has substantive content (not placeholder)
     local gherkin_block=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$gherkin_block" | grep -q "Scenario:" && \
-       ! echo "$gherkin_block" | grep -qiE "works as specified|works as expected|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct"; then
+       ! echo "$gherkin_block" | grep -qiE "$reject_pattern"; then
         success "Gherkin scenarios already contain substantive content - preserving"
         return 0
     fi
@@ -2111,11 +2139,8 @@ ${scope_out}
 
 INSTRUCTIONS:
 Write concrete, testable Gherkin scenarios for this feature. Follow these rules strictly:
-1. Use real, specific values - NEVER use placeholders like \"the feature works as specified\" or \"expected behavior occurs\"
-2. Each Scenario must have concrete Given/When/Then steps with specific data
-3. Cover the happy path and at least one error/edge case
-4. Keep scenarios focused - one behavior per scenario
-5. Use the exact feature title: ${feature_title}
+${prompt_rules}
+Use the exact feature title: ${feature_title}
 
 OUTPUT FORMAT:
 Return ONLY a valid Gherkin feature block. No markdown fences, no explanations before or after. Start directly with 'Feature:' and end after the last scenario. Example format:
@@ -2196,7 +2221,7 @@ else:
     fi
 
     # Final safety check: reject if LLM produced placeholder-like content
-    if echo "$clean_gherkin" | grep -qiE "works as specified|works as expected|the feature is used|expected behavior occurs|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct"; then
+    if echo "$clean_gherkin" | grep -qiE "$reject_pattern"; then
         warn "LLM produced placeholder-like Gherkin — keeping existing"
         return 1
     fi
@@ -2349,6 +2374,208 @@ EOF
     success "Language detected: $language"
     info "Review and refine repo_context.md if needed"
     echo ""
+}
+
+# Engineering Principles Agent - generates principles from spec + repo context
+engineering_principles_agent() {
+    local ticket_dir="$1"
+    local spec_file="$ticket_dir/spec.md"
+    local repo_context_file="$ticket_dir/repo_context.md"
+    local rules_file="$SCRIPT_DIR/agents/engineering_principles.md"
+
+    [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+
+    info "Analyzing engineering principles..."
+
+    # Check if section already has substantive content
+    local existing=$(sed -n '/^## Engineering principles and DoD additions/,/^## /p' "$spec_file" | sed '1d;$d')
+    if echo "$existing" | grep -qE '^- [[:alnum:]].*[[:alnum:]]'; then
+        success "Engineering principles already contain substantive content - preserving"
+        return 0
+    fi
+
+    # Extract spec sections for context
+    local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    local security_section=$(sed -n '/^## Security and compliance/,/^## /p' "$spec_file" | sed '1d;$d')
+    local test_section=$(sed -n '/^## Test strategy/,/^## /p' "$spec_file" | sed '1d;$d')
+    local gherkin=$(sed -n '/^## Acceptance Criteria/,/^## /p' "$spec_file" | sed '1d;$d')
+
+    # Read categories from .md file
+    local principle_cats=""
+    local dod_cats=""
+    local output_rules=""
+    local lang_principles=""
+
+    if [ -f "$rules_file" ]; then
+        principle_cats=$(awk '/^## Principle categories$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file")
+        dod_cats=$(awk '/^## DoD addition categories$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file")
+        output_rules=$(awk '/^## Output rules$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file")
+
+        # Detect language marker from architecture section
+        local detected_stack=$(echo "$arch_section" | grep -E "^- (Tech stack|Detected stack):" | head -1 | sed 's/^- [^:]*:[[:space:]]*//')
+        local lang_marker=""
+
+        # Map stack keywords to manifest files
+        if echo "$detected_stack" | grep -qiE "node|typescript|javascript|react|vue|angular|next"; then
+            lang_marker="package.json"
+        elif echo "$detected_stack" | grep -qiE "python|django|flask|fastapi"; then
+            lang_marker="pyproject.toml"
+        elif echo "$detected_stack" | grep -qiE "rust|cargo"; then
+            lang_marker="Cargo.toml"
+        elif echo "$detected_stack" | grep -qiE "go|golang"; then
+            lang_marker="go.mod"
+        elif echo "$detected_stack" | grep -qiE "ruby|rails"; then
+            lang_marker="Gemfile"
+        elif echo "$detected_stack" | grep -qiE "php|laravel|symfony"; then
+            lang_marker="composer.json"
+        elif echo "$detected_stack" | grep -qiE "elixir|phoenix"; then
+            lang_marker="mix.exs"
+        fi
+
+        if [ -n "$lang_marker" ]; then
+            lang_principles=$(awk -v m="$lang_marker" '$0 ~ "^- "m":" {sub("^- "m":[[:space:]]*",""); print; exit}' "$rules_file")
+        fi
+    fi
+
+    # Build LLM prompt
+    local prompt="You are a senior engineer writing engineering principles and Definition of Done additions for a software ticket.
+
+CONTEXT:
+${context}
+
+GOAL:
+${goal}
+
+ARCHITECTURE:
+${arch_section}
+
+SECURITY:
+${security_section}
+
+GHERKIN SCENARIOS:
+${gherkin}
+
+PRINCIPLE CATEGORIES TO CONSIDER:
+${principle_cats:-code_quality, performance, error_handling, observability, edge_cases, anti_patterns}
+
+DOD ADDITION CATEGORIES:
+${dod_cats:-verification, tests, documentation, security_checks}
+
+${lang_principles:+LANGUAGE-SPECIFIC PRINCIPLES:
+${lang_principles}
+}
+OUTPUT RULES:
+${output_rules:-Each principle: 1-2 sentences, specific to this ticket. Skip categories that do not apply. Focus on risks.}
+
+OUTPUT FORMAT:
+Return ONLY bullet points (- prefix), one per line. No headers, no explanations, no markdown. Each bullet should be a specific, actionable engineering principle or DoD addition for THIS ticket. Aim for 3-6 bullets total."
+
+    # Try LLM
+    local llm_response
+    llm_response=$(ollama_generate "$prompt" 2>/dev/null) || {
+        warn "Ollama unavailable — generating defaults from .md rules"
+        # Fallback: write category-based defaults
+        local defaults=""
+        if [ -n "$lang_principles" ]; then
+            defaults="- ${lang_principles}"
+        else
+            defaults="- Follow existing code patterns and conventions"
+        fi
+        defaults="${defaults}\n- All new code must have corresponding tests"
+        defaults="${defaults}\n- No hardcoded secrets or credentials"
+
+        local temp_file=$(mktemp)
+        local temp_defaults=$(mktemp)
+        printf '%b\n' "$defaults" > "$temp_defaults"
+        if grep -q '^## Engineering principles and DoD additions' "$spec_file"; then
+            awk -v pfile="$temp_defaults" '/^## Engineering principles and DoD additions/ {
+                    print; while ((getline line < pfile) > 0) print line; close(pfile); found=1; next }
+                 found && /^## / { found=0 }
+                 !found { print }
+                 END { if(found) { while ((getline line < pfile) > 0) print line; close(pfile) } }' "$spec_file" > "$temp_file" && mv "$temp_file" "$spec_file"
+        else
+            awk -v pfile="$temp_defaults" '
+                /^## (Definition of (Done|Ready)|Open questions)/ && !inserted {
+                    print "## Engineering principles and DoD additions"
+                    while ((getline line < pfile) > 0) print line; close(pfile)
+                    print ""
+                    inserted=1
+                }
+                { print }
+                END { if (!inserted) { print ""; print "## Engineering principles and DoD additions"; while ((getline line < pfile) > 0) print line; close(pfile) } }
+            ' "$spec_file" > "$temp_file" && mv "$temp_file" "$spec_file"
+        fi
+        rm -f "$temp_defaults"
+        success "Engineering principles defaults written - LLM unavailable"
+        return 0
+    }
+
+    if [ -z "$llm_response" ]; then
+        warn "Empty LLM response — skipping engineering principles"
+        return 1
+    fi
+
+    # Extract bullet points from response (accept - bullets, • bullets, * bullets, numbered lists)
+    local clean_principles
+    clean_principles=$(echo "$llm_response" | \
+        grep -E '^- |^•|^\* |^[0-9]+\.' | \
+        sed 's/^[0-9]*\.[[:space:]]*/- /' | \
+        sed 's/^•[[:space:]]*/- /' | \
+        sed 's/^\* /- /' | \
+        sed 's/\*\*//g' | \
+        sed 's/^- - /- /' | \
+        head -10)
+
+    if [ -z "$clean_principles" ]; then
+        warn "LLM response contained no extractable principles — skipping"
+        return 1
+    fi
+
+    # Write to spec (use temp file for principles to avoid macOS awk newline-in-string issue)
+    local temp_file=$(mktemp)
+    local temp_principles=$(mktemp)
+    echo "$clean_principles" > "$temp_principles"
+
+    if grep -q '^## Engineering principles and DoD additions' "$spec_file"; then
+        # Section exists — replace content
+        awk -v pfile="$temp_principles" '
+            /^## Engineering principles and DoD additions/ {
+                print
+                while ((getline line < pfile) > 0) print line
+                close(pfile)
+                skip=1
+                next
+            }
+            skip && /^## / { skip=0 }
+            !skip { print }
+        ' "$spec_file" > "$temp_file" && mv "$temp_file" "$spec_file"
+    else
+        # Section missing — insert before Definition of Done/Ready or append at end
+        awk -v pfile="$temp_principles" '
+            /^## (Definition of (Done|Ready)|Open questions)/ && !inserted {
+                print "## Engineering principles and DoD additions"
+                while ((getline line < pfile) > 0) print line
+                close(pfile)
+                print ""
+                inserted=1
+            }
+            { print }
+            END {
+                if (!inserted) {
+                    print ""
+                    print "## Engineering principles and DoD additions"
+                    while ((getline line < pfile) > 0) print line
+                    close(pfile)
+                }
+            }
+        ' "$spec_file" > "$temp_file" && mv "$temp_file" "$spec_file"
+    fi
+    rm -f "$temp_principles"
+
+    success "Engineering principles generated by LLM"
+    return 0
 }
 
 # Refine command - run multi-agent refinement pipeline
@@ -2664,7 +2891,8 @@ Rules:
         if [ -n "$llm_response" ]; then
             # Extract only data rows (skip header/separator rows the LLM echoes back)
             llm_scenario_mapping=$(echo "$llm_response" | grep '^|' | \
-                grep -vi '| *Scenario name\b\|| *Scenario *|\|| *layer *|\|^| *-' | head -20)
+                grep -vi '| *Scenario name\b\|| *Scenario *|\|| *layer *|\|^| *-' | \
+                awk -F'|' '!seen[$2]++' | head -20)
         fi
     fi
 
@@ -2786,6 +3014,56 @@ cmd_refine() {
     # Write issue body to temporary spec file
     echo "$issue_body" > "$spec_file"
 
+    # Ensure all required spec sections exist (user-created issues may omit template sections)
+    local required_sections=(
+        "## Acceptance Criteria (Gherkin)"
+        "## Architecture alignment"
+        "## Code structure"
+        "## Security and compliance"
+        "## Test strategy"
+        "## Engineering principles and DoD additions"
+    )
+
+    for section in "${required_sections[@]}"; do
+        if ! grep -q "^${section}" "$spec_file"; then
+            echo "" >> "$spec_file"
+            echo "$section" >> "$spec_file"
+            echo "-" >> "$spec_file"
+        fi
+    done
+
+    # Add Definition of Done/Ready with proper defaults if missing
+    if ! grep -q "^## Definition of Done" "$spec_file"; then
+        cat >> "$spec_file" <<'DOD_EOF'
+
+## Definition of Done
+- PR created with changes scoped correctly
+- Tests added/updated
+- All required checks green
+- Acceptance criteria satisfied
+- Documentation updated (if needed)
+DOD_EOF
+    fi
+
+    if ! grep -q "^## Definition of Ready" "$spec_file"; then
+        cat >> "$spec_file" <<'DOR_EOF'
+
+## Definition of Ready
+- [ ] Scope in/out defined
+- [ ] Gherkin scenarios are present and testable
+- [ ] Architecture alignment reviewed and constraints captured
+- [ ] Security/compliance reviewed and constraints captured
+- [ ] Test strategy defined for each scenario
+- [ ] Repo golden commands known or explicitly blocked
+- [ ] Allowed/forbidden paths set
+- [ ] No blocking questions remain
+- [ ] Code structure reviewed
+- [ ] Engineering principles captured
+- [ ] Fields contain distinct content
+- [ ] Sufficient detail provided
+DOR_EOF
+    fi
+
     # Create minimal repo_context.md (extract from spec metadata if present)
     local repo_path=$(echo "$issue_body" | grep "^- Repo:" | sed 's/^- Repo: `\(.*\)`/\1/')
     local base_ref=$(echo "$issue_body" | grep "^- Base ref:" | sed 's/^- Base ref: `\(.*\)`/\1/')
@@ -2868,6 +3146,15 @@ QUES_EOF
 
     # Run Test Strategy Agent (rule-based + LLM enhancement)
     test_strategy_agent "$temp_dir"
+    echo ""
+
+    # Run Engineering Principles Agent
+    info "Running Engineering Principles Agent..."
+    if engineering_principles_agent "$temp_dir"; then
+        success "Engineering Principles Agent completed"
+    else
+        warn "Engineering Principles Agent reported issues (continuing to Judge)"
+    fi
     echo ""
 
     # Read updated spec back
