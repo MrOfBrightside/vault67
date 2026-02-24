@@ -16,6 +16,10 @@
 - build.gradle: ./gradlew build | ./gradlew test
 - Gemfile: bundle install | bundle exec rspec
 - Dockerfile: docker compose build | docker compose run --rm app pytest
+- composer.json: composer install | ./vendor/bin/phpunit
+- mix.exs: mix deps.get && mix compile | mix test
+- Package.swift: swift build | swift test
+- *.csproj: dotnet build | dotnet test
 
 ## Test layers
 # Note: e2e layer requires frontend presence (React/Vue/Angular/Svelte or frontend/ dir).
@@ -30,6 +34,8 @@
 - CLI,command,flag,argument: integration | subprocess/exec | Invoke CLI commands, verify stdout/stderr/exit codes
 - email,notification,webhook,event: integration | mock-server | Test external service interactions with mocks
 - file,upload,download,export,import: integration | tmp-fixtures | Test file I/O with temp directories
+- performance,load,concurrent,throughput,latency,scalable: performance | k6/locust | Load test with simulated traffic, measure response times and throughput
+- contract,consumer,provider,microservice,API-first: contract | pact/dredd | Consumer-driven contract tests between services
 
 ## Default test layer
 unit | pytest/jest | Test business logic functions in isolation
@@ -58,3 +64,9 @@ unit | pytest/jest | Test business logic functions in isolation
 - Cargo.toml: cargo-test | cargo-test | - | cargo clippy | (built-in)
 - go.mod: go-test | go-test | - | golangci-lint run | (built-in)
 - Gemfile: rspec | rspec-rails | Capybara | rubocop | sorbet
+- composer.json: phpunit | phpunit | - | phpstan analyse | (n/a)
+- mix.exs: ExUnit | ExUnit | - | mix credo | dialyzer
+- Package.swift: XCTest | XCTest | - | swiftlint | (built-in)
+- *.csproj: xUnit/NUnit | xUnit/NUnit | Playwright | dotnet format | (built-in)
+- pom.xml: JUnit | JUnit | - | checkstyle | (built-in)
+- build.gradle: JUnit | JUnit | - | checkstyle | (built-in)

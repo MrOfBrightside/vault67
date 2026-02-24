@@ -30,6 +30,12 @@ Feature: <feature name>
 - Allowed paths:
 - Forbidden paths:
 
+## Code structure
+- Module pattern:
+- File conventions:
+- Import rules:
+- Notes:
+
 ## Security and compliance
 - Data classification:
 - AuthN/AuthZ:
@@ -67,3 +73,7 @@ Feature: <feature name>
 - [ ] Repo golden commands known or explicitly blocked
 - [ ] Allowed/forbidden paths set
 - [ ] No blocking questions remain
+- [ ] Code structure reviewed
+- [ ] Engineering principles captured
+- [ ] Fields contain distinct content
+- [ ] Sufficient detail provided

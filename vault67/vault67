@@ -539,8 +539,10 @@ _judge_add_question() {
 judge_agent() {
     local spec_file="$1"
     local questions_file="$2"
+    local rules_file="$SCRIPT_DIR/agents/judge.md"
 
     [ ! -f "$spec_file" ] && error "spec.md not found: $spec_file"
+    [ ! -f "$rules_file" ] && error "judge.md not found: $rules_file"
 
     info "Running Judge Agent (Gatekeeper)..."
 
@@ -548,206 +550,333 @@ judge_agent() {
     local blocking_questions_exist=false
     local dor_results=()
 
-    # Extract content from spec.md
-    local spec_content=$(cat "$spec_file")
+    # Read spec content
+    local spec_content
+    spec_content=$(cat "$spec_file")
 
-    # Extract key fields for multi-check use
-    local context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
-    local goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
-    local requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
+    # --- Helper: extract a section from spec content ---
+    # Args: section_header [grep_range]
+    # If grep_range > 0, uses grep -A N; otherwise extracts from header to next ## heading
+    _judge_extract_section() {
+        local content="$1"
+        local header="$2"
+        local range="${3:-0}"
 
-    # Check 1: Scope defined (in-scope required, out-of-scope is optional)
-    local has_scope=false
-    local scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
-    if echo "$scope_in" | grep -q -e "^[-•*][[:space:]]*[^[:space:]]"; then
-        has_scope=true
-        dor_results+=("[x] Scope in/out defined")
-    else
-        has_scope=false
-        all_criteria_met=false
-        dor_results+=("[ ] Scope in/out defined")
-        _judge_add_question "$questions_file" "What is in scope for this work? Please list specific deliverables."
-    fi
-
-    # Check 2: Gherkin scenarios present, testable, and not generic placeholders
-    local has_gherkin=false
-    local _gherkin_fail_reason=""
-    local gherkin_block=$(echo "$spec_content" | sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p')
-    if echo "$gherkin_block" | grep -q "Feature:\s\+\w" && \
-       echo "$gherkin_block" | grep -q "Scenario:\s\+\w" && \
-       echo "$gherkin_block" | grep -q "Given\s\+\w" && \
-       echo "$gherkin_block" | grep -q "When\s\+\w" && \
-       echo "$gherkin_block" | grep -q "Then\s\+\w"; then
-        # 2a: Reject generic/placeholder Gherkin (expanded pattern)
-        if echo "$gherkin_block" | grep -qiE "works as expected|works as specified|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct"; then
-            _gherkin_fail_reason="generic placeholders detected"
-        fi
-        # 2b: Require at least 2 scenarios (happy path + error/edge case)
-        local _scenario_count=$(echo "$gherkin_block" | grep -c "Scenario:")
-        if [ "$_scenario_count" -lt 2 ] && [ -z "$_gherkin_fail_reason" ]; then
-            _gherkin_fail_reason="only $_scenario_count scenario (need at least 2)"
-        fi
-        if [ -n "$_gherkin_fail_reason" ]; then
-            has_gherkin=false
-            all_criteria_met=false
-            dor_results+=("[ ] Gherkin scenarios are present and testable ($_gherkin_fail_reason)")
+        if [ "$range" -gt 0 ] 2>/dev/null; then
+            # grep_range: take N lines after header, but stop at next ## boundary
+            echo "$content" | grep -F -A "$range" -- "$header" 2>/dev/null | \
+                awk 'NR==1{next} /^## /{exit} {print}' || true
         else
-            has_gherkin=true
-            dor_results+=("[x] Gherkin scenarios are present and testable")
+            # Full section: from header to next ## heading (literal match, not regex)
+            echo "$content" | awk -v hdr="$header" '
+                index($0, hdr) == 1 { found=1; next }
+                found && /^## / { exit }
+                found { print }
+            '
         fi
-    else
-        has_gherkin=false
-        all_criteria_met=false
-        dor_results+=("[ ] Gherkin scenarios are present and testable")
-    fi
+    }
 
-    # Check 3: Architecture alignment reviewed and constraints captured
-    local has_architecture=false
-    if echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Detected stack:[[:space:]]*[^[:space:]]" || \
-       echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Constraints:[[:space:]]*[^[:space:]]"; then
-        has_architecture=true
-        dor_results+=("[x] Architecture alignment reviewed and constraints captured")
-    else
-        has_architecture=false
-        all_criteria_met=false
-        dor_results+=("[ ] Architecture alignment reviewed and constraints captured")
-    fi
+    # --- Helper: evaluate a single criterion ---
+    _judge_eval_criterion() {
+        local name="$1"
+        local section="$2"
+        local pattern="$3"
+        local and_patterns="$4"       # newline-separated
+        local or_patterns="$5"        # newline-separated
+        local reject_pattern="$6"
+        local min_matches="$7"        # format: "pattern N"
+        local range="$8"
+        local question="$9"
+        local and_section="${10:-}"
+        local and_section_pattern="${11:-}"
 
-    # Check 4: Security/compliance reviewed and constraints captured
-    local has_security=false
-    if echo "$spec_content" | grep -A 10 "## Security and compliance" | grep -q -e "- [[:alnum:]]*:[[:space:]]*[^[:space:]]" || \
-       echo "$spec_content" | grep -A 10 "## Security and compliance" | grep -q -E "N/A|not applicable"; then
-        has_security=true
-        dor_results+=("[x] Security/compliance reviewed and constraints captured")
-    else
-        has_security=false
-        all_criteria_met=false
-        dor_results+=("[ ] Security/compliance reviewed and constraints captured")
-    fi
+        local section_content
+        section_content=$(_judge_extract_section "$spec_content" "$section" "$range")
 
-    # Check 5: Test strategy defined with test layers
-    local has_test_strategy=false
-    if echo "$spec_content" | grep -q -e "- Golden build command:[[:space:]]*[^[:space:]]" && \
-       echo "$spec_content" | grep -q -e "- Golden test command:[[:space:]]*[^[:space:]]" && \
-       echo "$spec_content" | grep -qE "^- (Unit|Integration|E2E|e2e) tests:"; then
-        has_test_strategy=true
-        dor_results+=("[x] Test strategy defined with test layers")
-    else
-        has_test_strategy=false
-        all_criteria_met=false
-        dor_results+=("[ ] Test strategy defined with test layers")
-    fi
+        local pass=false
 
-    # Check 6: Repo golden commands known or explicitly blocked
-    local has_golden_commands=false
-    if echo "$spec_content" | grep -q -e "- Golden build command:[[:space:]]*[^[:space:]]" && \
-       echo "$spec_content" | grep -q -e "- Golden test command:[[:space:]]*[^[:space:]]"; then
-        has_golden_commands=true
-        dor_results+=("[x] Repo golden commands known or explicitly blocked")
-    else
-        has_golden_commands=false
-        all_criteria_met=false
-        dor_results+=("[ ] Repo golden commands known or explicitly blocked")
-    fi
+        # Primary pattern check
+        if [ -n "$pattern" ]; then
+            if echo "$section_content" | grep -qE -- "$pattern" 2>/dev/null; then
+                pass=true
+            fi
+        fi
 
-    # Check 7: Allowed/forbidden paths set
-    local has_paths=false
-    if echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Allowed paths:[[:space:]]*[^[:space:]]" || \
-       echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Forbidden paths:[[:space:]]*[^[:space:]]"; then
-        has_paths=true
-        dor_results+=("[x] Allowed/forbidden paths set")
-    else
-        has_paths=false
-        all_criteria_met=false
-        dor_results+=("[ ] Allowed/forbidden paths set")
-    fi
+        # or_patterns: if any matches, pass
+        if [ "$pass" = false ] && [ -n "$or_patterns" ]; then
+            while IFS= read -r op; do
+                [ -z "$op" ] && continue
+                if echo "$section_content" | grep -qE -- "$op" 2>/dev/null; then
+                    pass=true
+                    break
+                fi
+            done <<< "$or_patterns"
+        fi
 
-    # Check 8: No blocking questions remain
-    local has_no_blocking_questions=true
-    if [ -f "$questions_file" ]; then
-        # Extract blocking questions section
-        local questions_section=$(sed -n '/## Blocking questions/,/## Notes/p' "$questions_file")
+        # and_patterns on the main section: all must match
+        if [ "$pass" = true ] && [ -n "$and_patterns" ]; then
+            while IFS= read -r ap; do
+                [ -z "$ap" ] && continue
+                if ! echo "$section_content" | grep -qE -- "$ap" 2>/dev/null; then
+                    pass=false
+                    break
+                fi
+            done <<< "$and_patterns"
+        fi
 
-        # Check if there are actual questions with content (not just template placeholders)
-        # Look for lines like "1) Question: something" or "Question: something" where something is not empty
-        if echo "$questions_section" | grep -E "^\s*[0-9]+\)\s+Question:\s*.+$" > /dev/null; then
-            # There are questions with content - check if they have answers
-            if echo "$questions_section" | grep -E "Answer:\s*$" > /dev/null; then
-                # Questions exist but some answers are empty
-                has_no_blocking_questions=false
-                blocking_questions_exist=true
-                all_criteria_met=false
-                dor_results+=("[ ] No blocking questions remain")
+        # and_section + and_section_pattern: secondary section must also match
+        if [ "$pass" = true ] && [ -n "$and_section" ]; then
+            local and_section_content
+            and_section_content=$(_judge_extract_section "$spec_content" "$and_section" "$range")
+            if [ -n "$and_section_pattern" ]; then
+                while IFS= read -r asp; do
+                    [ -z "$asp" ] && continue
+                    if ! echo "$and_section_content" | grep -qE -- "$asp" 2>/dev/null; then
+                        pass=false
+                        break
+                    fi
+                done <<< "$and_section_pattern"
             else
-                # All questions have answers
-                dor_results+=("[x] No blocking questions remain")
+                # and_section specified but no pattern — just check it has content
+                local _asc_lines
+                _asc_lines=$(echo "$and_section_content" | grep -c '[[:alnum:]]' 2>/dev/null) || _asc_lines=0
+                if [ "$_asc_lines" -eq 0 ]; then
+                    pass=false
+                fi
+            fi
+        fi
+
+        # reject_pattern: if matches, override pass to fail
+        local _reject_reason=""
+        if [ "$pass" = true ] && [ -n "$reject_pattern" ]; then
+            if echo "$section_content" | grep -qiE -- "$reject_pattern" 2>/dev/null; then
+                pass=false
+                _reject_reason="generic placeholders detected"
+            fi
+        fi
+
+        # min_matches: require at least N matches of a pattern
+        local _min_fail_reason=""
+        if [ "$pass" = true ] && [ -n "$min_matches" ]; then
+            local mm_pattern mm_count mm_actual
+            mm_pattern=$(echo "$min_matches" | sed 's/ [0-9]*$//')
+            mm_count=$(echo "$min_matches" | grep -oE '[0-9]+$')
+            mm_actual=$(echo "$section_content" | grep -c -- "$mm_pattern" 2>/dev/null) || mm_actual=0
+            if [ "$mm_actual" -lt "$mm_count" ]; then
+                pass=false
+                _min_fail_reason="only $mm_actual $mm_pattern (need at least $mm_count)"
+            fi
+        fi
+
+        # Record result
+        if [ "$pass" = true ]; then
+            dor_results+=("[x] $name")
+        else
+            all_criteria_met=false
+            local fail_detail=""
+            if [ -n "$_reject_reason" ]; then
+                fail_detail=" ($_reject_reason)"
+            elif [ -n "$_min_fail_reason" ]; then
+                fail_detail=" ($_min_fail_reason)"
+            fi
+            dor_results+=("[ ] ${name}${fail_detail}")
+            if [ -n "$question" ]; then
+                _judge_add_question "$questions_file" "$question"
+            fi
+        fi
+    }
+
+    # --- Special check: blocking questions ---
+    _judge_check_blocking_questions() {
+        local name="$1"
+        local has_no_blocking_questions=true
+        if [ -f "$questions_file" ]; then
+            local questions_section
+            questions_section=$(sed -n '/## Blocking questions/,/## Notes/p' "$questions_file")
+            if echo "$questions_section" | grep -E "^\s*[0-9]+\)\s+Question:\s*.+$" > /dev/null 2>&1; then
+                if echo "$questions_section" | grep -E "Answer:\s*$" > /dev/null 2>&1; then
+                    has_no_blocking_questions=false
+                    blocking_questions_exist=true
+                    all_criteria_met=false
+                    dor_results+=("[ ] $name")
+                else
+                    dor_results+=("[x] $name")
+                fi
+            else
+                dor_results+=("[x] $name")
             fi
         else
-            # No real questions (just template), consider it as no blocking questions
-            dor_results+=("[x] No blocking questions remain")
+            dor_results+=("[x] $name")
         fi
-    else
-        dor_results+=("[x] No blocking questions remain")
-    fi
+    }
 
-    # Check 9: Cross-field duplicate detection
-    local _dup_check_pass=true
-    # Normalize: lowercase, strip list markers/whitespace, collapse
-    local _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _dup_count=0
-    if [ -n "$_norm_ctx" ]; then
-        [ "$_norm_ctx" = "$_norm_goal" ] && _dup_count=$((_dup_count + 1))
-        [ "$_norm_ctx" = "$_norm_req" ] && _dup_count=$((_dup_count + 1))
-        [ "$_norm_ctx" = "$_norm_scope" ] && _dup_count=$((_dup_count + 1))
-    fi
-    if [ "$_dup_count" -ge 2 ]; then
-        _dup_check_pass=false
-        all_criteria_met=false
-        dor_results+=("[ ] Fields contain distinct content (context duplicated in $_dup_count other fields)")
-    else
-        dor_results+=("[x] Fields contain distinct content")
-    fi
+    # --- Special check: duplicate fields ---
+    _judge_check_duplicate_fields() {
+        local name="$1"
+        local context goal requirements scope_in
+        context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
+        goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
+        requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
+        scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
 
-    # Check 10: Minimum substance threshold (at least 4 substantive lines across context+goal+requirements)
-    local _substance_check_pass=true
-    local _substance_lines=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
-        grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification' | \
-        grep -c '[[:alnum:]]')
-    if [ "$_substance_lines" -lt 4 ]; then
-        _substance_check_pass=false
-        all_criteria_met=false
-        dor_results+=("[ ] Sufficient detail provided (only $_substance_lines substantive lines, need at least 4)")
-    else
-        dor_results+=("[x] Sufficient detail provided")
-    fi
+        local _norm_ctx _norm_goal _norm_req _norm_scope
+        _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-    # Update Definition of Ready checklist in spec.md
-    local temp_file=$(mktemp)
-    local in_dor_section=false
-    local dor_index=0
+        local _dup_count=0
+        if [ -n "$_norm_ctx" ]; then
+            [ "$_norm_ctx" = "$_norm_goal" ] && _dup_count=$((_dup_count + 1))
+            [ "$_norm_ctx" = "$_norm_req" ] && _dup_count=$((_dup_count + 1))
+            [ "$_norm_ctx" = "$_norm_scope" ] && _dup_count=$((_dup_count + 1))
+        fi
+        if [ "$_dup_count" -ge 2 ]; then
+            all_criteria_met=false
+            dor_results+=("[ ] $name (context duplicated in $_dup_count other fields)")
+        else
+            dor_results+=("[x] $name")
+        fi
+    }
+
+    # --- Special check: substance threshold ---
+    _judge_check_substance_threshold() {
+        local name="$1"
+        local min_sub="${2:-4}"
+        local context goal requirements
+        context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
+        goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
+        requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
+
+        local _substance_lines
+        _substance_lines=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
+            grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification' | \
+            grep -c '[[:alnum:]]' 2>/dev/null) || _substance_lines=0
+        if [ "$_substance_lines" -lt "$min_sub" ]; then
+            all_criteria_met=false
+            dor_results+=("[ ] $name (only $_substance_lines substantive lines, need at least $min_sub)")
+        else
+            dor_results+=("[x] $name")
+        fi
+    }
+
+    # --- Parse judge.md and evaluate each criterion ---
+    local cur_name="" cur_section="" cur_pattern="" cur_and_patterns="" cur_or_patterns=""
+    local cur_reject="" cur_min_matches="" cur_range="0" cur_question=""
+    local cur_and_section="" cur_and_section_pattern=""
+    local cur_special="" cur_min_substance=""
+    local _has_and_section=false
+
+    _judge_flush_criterion() {
+        [ -z "$cur_name" ] && return 0
+
+        if [ -n "$cur_special" ]; then
+            case "$cur_special" in
+                check_blocking_questions)
+                    _judge_check_blocking_questions "$cur_name"
+                    ;;
+                check_duplicate_fields)
+                    _judge_check_duplicate_fields "$cur_name"
+                    ;;
+                check_substance_threshold)
+                    _judge_check_substance_threshold "$cur_name" "$cur_min_substance"
+                    ;;
+                *)
+                    warn "Unknown special check: $cur_special"
+                    all_criteria_met=false
+                    dor_results+=("[ ] $cur_name (unknown special check)")
+                    ;;
+            esac
+        else
+            _judge_eval_criterion \
+                "$cur_name" \
+                "$cur_section" \
+                "$cur_pattern" \
+                "$cur_and_patterns" \
+                "$cur_or_patterns" \
+                "$cur_reject" \
+                "$cur_min_matches" \
+                "$cur_range" \
+                "$cur_question" \
+                "$cur_and_section" \
+                "$cur_and_section_pattern"
+        fi
+
+        # Reset
+        cur_name="" cur_section="" cur_pattern="" cur_and_patterns="" cur_or_patterns=""
+        cur_reject="" cur_min_matches="" cur_range="0" cur_question=""
+        cur_and_section="" cur_and_section_pattern=""
+        cur_special="" cur_min_substance=""
+        _has_and_section=false
+    }
 
     while IFS= read -r line; do
-        if [[ "$line" == "## Definition of Ready" ]]; then
-            in_dor_section=true
-            echo "$line" >> "$temp_file"
-        elif [[ "$in_dor_section" == true && "$line" =~ ^\-[[:space:]]\[[[:space:]]\] ]]; then
-            if [ $dor_index -lt ${#dor_results[@]} ]; then
-                echo "- ${dor_results[$dor_index]}" >> "$temp_file"
-                dor_index=$((dor_index + 1))
-            else
-                echo "$line" >> "$temp_file"
-            fi
-        else
-            if [[ "$in_dor_section" == true && ! "$line" =~ ^\-[[:space:]]\[ ]]; then
-                in_dor_section=false
-            fi
-            echo "$line" >> "$temp_file"
+        # Detect criterion header: ### N. name
+        if [[ "$line" =~ ^###[[:space:]]+[0-9]+\.[[:space:]]+(.*) ]]; then
+            _judge_flush_criterion
+            cur_name="${BASH_REMATCH[1]}"
+            continue
         fi
-    done < "$spec_file"
 
+        # Parse key-value fields: - key: value
+        if [[ "$line" =~ ^-[[:space:]]+([a-z_]+):[[:space:]]*(.*) ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+
+            case "$key" in
+                section)       cur_section="$value" ;;
+                pattern)       cur_pattern="$value" ;;
+                and_section)
+                    cur_and_section="$value"
+                    _has_and_section=true
+                    ;;
+                and_pattern)
+                    if [ "$_has_and_section" = true ]; then
+                        # and_pattern after and_section: applies to the and_section
+                        if [ -n "$cur_and_section_pattern" ]; then
+                            cur_and_section_pattern="${cur_and_section_pattern}"$'\n'"${value}"
+                        else
+                            cur_and_section_pattern="$value"
+                        fi
+                    else
+                        # and_pattern before any and_section: applies to main section
+                        if [ -n "$cur_and_patterns" ]; then
+                            cur_and_patterns="${cur_and_patterns}"$'\n'"${value}"
+                        else
+                            cur_and_patterns="$value"
+                        fi
+                    fi
+                    ;;
+                or_pattern)
+                    if [ -n "$cur_or_patterns" ]; then
+                        cur_or_patterns="${cur_or_patterns}"$'\n'"${value}"
+                    else
+                        cur_or_patterns="$value"
+                    fi
+                    ;;
+                reject_pattern) cur_reject="$value" ;;
+                min_matches)    cur_min_matches="$value" ;;
+                grep_range)     cur_range="$value" ;;
+                question)       cur_question="$value" ;;
+                special)        cur_special="$value" ;;
+                min_substance)  cur_min_substance="$value" ;;
+            esac
+        fi
+    done < "$rules_file"
+
+    # Flush last criterion
+    _judge_flush_criterion
+
+    # --- Update DoR section in spec.md ---
+    local temp_file
+    temp_file=$(mktemp)
+    awk '/^## Definition of Ready/ { exit } { print }' "$spec_file" > "$temp_file"
+    {
+        echo "## Definition of Ready"
+        for result in "${dor_results[@]}"; do
+            echo "- $result"
+        done
+    } >> "$temp_file"
     mv "$temp_file" "$spec_file"
 
     # Print evaluation results

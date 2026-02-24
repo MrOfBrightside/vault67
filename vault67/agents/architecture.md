@@ -7,6 +7,18 @@
 ## Constraints
 # Project-specific rules the owner wants enforced.
 # These are passed verbatim to the implementing agent.
+- Follow existing repo patterns and conventions over introducing new ones.
+- Prefer composition over inheritance.
+- Keep modules loosely coupled with clear interface boundaries.
+- No business logic in controllers, routes, or handlers — delegate to services.
+- Side effects (I/O, network, database) belong at the edges, not in core logic.
+- One export per file unless tightly cohesive (e.g. type + factory).
+
+## Allowed paths
+# Paths workers are permitted to modify. When set in a repo override,
+# this acts as an allowlist — only these paths may be touched.
+# Default: all paths except those listed under Forbidden paths.
+*
 
 ## Forbidden paths
 # Paths workers must never modify.
@@ -34,6 +46,53 @@ node_modules, vendor, __pycache__, .git, dist, build, .next, .nuxt, target, .tox
 - Dockerfile: Docker | docker
 - docker-compose.yml: Docker | docker-compose
 - Makefile: Make | make
+
+## Framework detection
+# Secondary marker layer. After language detection, check for framework-specific
+# files to identify the meta-framework or server framework in use.
+# Format: marker-file-or-key: framework | category
+#
+# Node.js / TypeScript
+- next.config.*: Next.js | react-meta-framework
+- nuxt.config.*: Nuxt | vue-meta-framework
+- remix.config.*: Remix | react-meta-framework
+- svelte.config.*: SvelteKit | svelte-meta-framework
+- astro.config.*: Astro | static-meta-framework
+- angular.json: Angular | angular-framework
+- vite.config.*: Vite | build-tool
+- webpack.config.*: Webpack | build-tool
+- tsconfig.json: TypeScript | language-config
+- tailwind.config.*: Tailwind CSS | css-framework
+- postcss.config.*: PostCSS | css-tooling
+#
+# Node.js server frameworks (check package.json dependencies)
+- "express": Express | node-server
+- "fastify": Fastify | node-server
+- "koa": Koa | node-server
+- "hono": Hono | node-server
+- "nest": NestJS | node-server
+#
+# Python
+- manage.py: Django | python-web
+- app.py + flask: Flask | python-web
+- fastapi: FastAPI | python-web
+- streamlit: Streamlit | python-app
+#
+# Ruby
+- config/routes.rb: Rails | ruby-web
+- config.ru: Rack | ruby-web
+#
+# Go
+- go.sum + gin: Gin | go-web
+- go.sum + echo: Echo | go-web
+- go.sum + fiber: Fiber | go-web
+#
+# Elixir
+- mix.exs + phoenix: Phoenix | elixir-web
+#
+# PHP
+- artisan: Laravel | php-web
+- symfony.lock: Symfony | php-web
 
 ## Stop words
 # Words to exclude when matching Gherkin keywords to filenames.
