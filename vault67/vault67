@@ -4039,6 +4039,49 @@ cmd_implement() {
 
     info "Current labels: ${current_labels}"
 
+    # Check if issue has been broken into sub-tasks
+    if echo "$current_labels" | grep -q "has:subtasks"; then
+        info "Issue #${issue_number} has been broken into sub-tasks:"
+        echo ""
+        # Fetch what this parent depends on (its sub-tasks)
+        local deps_response
+        deps_response=$(api_get_dependencies "$issue_number" 2>/dev/null) || deps_response="[]"
+        python3 -c "
+import json, sys
+deps = json.load(sys.stdin)
+if not deps:
+    print('  (no sub-tasks found)')
+    sys.exit(0)
+for d in deps:
+    num = d.get('number', '?')
+    title = d.get('title', 'Untitled')
+    state = d.get('state', 'open')
+    labels = [l.get('name','') for l in d.get('labels', [])]
+    state_label = next((l for l in labels if l.startswith('state:')), state)
+    marker = '✓' if state == 'closed' else '○'
+    print(f'  {marker} #{num}: {title} [{state_label}]')
+" <<< "$deps_response"
+        echo ""
+        # Find first open sub-task
+        local first_open
+        first_open=$(python3 -c "
+import json, sys
+deps = json.load(sys.stdin)
+for d in deps:
+    if d.get('state') != 'closed':
+        print(d['number'])
+        break
+" <<< "$deps_response" 2>/dev/null) || true
+        if [ -n "$first_open" ]; then
+            info "Implement the first open sub-task:"
+            echo "  vault67 implement ${first_open}"
+        else
+            info "All sub-tasks are complete! Mark the parent done:"
+            echo "  vault67 done ${issue_number}"
+        fi
+        return 0
+    fi
+
     # Check if issue is in READY_TO_IMPLEMENT state
     if ! echo "$current_labels" | grep -q "state:READY_TO_IMPLEMENT"; then
         error "Issue must be in state:READY_TO_IMPLEMENT (current: ${current_labels})"
@@ -5132,6 +5175,14 @@ cmd_done() {
     [ -z "$issue_number" ] && error "Usage: vault67 done <issue-number>"
     require_api_config
 
+    # Fetch issue body for sub-task detection
+    local issue_body=""
+    local done_api_response
+    done_api_response=$(api_get_issue "$issue_number" 2>/dev/null) || true
+    if [ -n "$done_api_response" ]; then
+        issue_body=$(echo "$done_api_response" | extract_issue_body 2>/dev/null) || true
+    fi
+
     info "Marking issue #${issue_number} as DONE..."
 
     # Set state:DONE label
@@ -5146,6 +5197,60 @@ cmd_done() {
     api_add_comment "$issue_number" "Issue completed and closed at ${timestamp} via \`vault67 done\`" > /dev/null
 
     success "Issue #${issue_number} marked as DONE and closed"
+
+    # Check if this is a sub-task — auto-close parent when all siblings done
+    if echo "$issue_body" | grep -q "^## Parent"; then
+        local parent_num
+        parent_num=$(echo "$issue_body" | python3 -c "
+import sys, re
+body = sys.stdin.read()
+m = re.search(r'Issue:\s*#(\d+)', body)
+if m:
+    print(m.group(1))
+" 2>/dev/null) || true
+
+        if [ -n "$parent_num" ]; then
+            info "Sub-task of #${parent_num} — checking sibling status..."
+            # Get all sub-tasks (parent's dependencies)
+            local parent_deps
+            parent_deps=$(api_get_dependencies "$parent_num" 2>/dev/null) || parent_deps="[]"
+            local all_closed
+            all_closed=$(python3 -c "
+import json, sys
+deps = json.load(sys.stdin)
+if not deps:
+    print('no')
+    sys.exit(0)
+all_done = all(d.get('state') == 'closed' for d in deps)
+print('yes' if all_done else 'no')
+" <<< "$parent_deps" 2>/dev/null) || all_closed="no"
+
+            if [ "$all_closed" = "yes" ]; then
+                info "All sub-tasks complete — closing parent #${parent_num}..."
+                api_replace_labels "$parent_num" "state:DONE" > /dev/null
+                local close_json
+                close_json=$(python3 -c "import json; print(json.dumps({'state': 'closed'}))")
+                api_request "PATCH" "/repos/${FORGEJO_REPO}/issues/${parent_num}" "$close_json" > /dev/null
+                local ts
+                ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                api_add_comment "$parent_num" "All sub-tasks completed. Parent auto-closed at ${ts} via \`vault67 done\`" > /dev/null
+                success "Parent #${parent_num} auto-closed (all sub-tasks done)"
+            else
+                local remaining
+                remaining=$(python3 -c "
+import json, sys
+deps = json.load(sys.stdin)
+open_deps = [d for d in deps if d.get('state') != 'closed']
+for d in open_deps:
+    print(f\"  #{d['number']}: {d['title']}\")
+" <<< "$parent_deps" 2>/dev/null) || true
+                if [ -n "$remaining" ]; then
+                    info "Remaining sub-tasks for #${parent_num}:"
+                    echo "$remaining"
+                fi
+            fi
+        fi
+    fi
 
     # Check what this issue was blocking
     local blocks_response
@@ -5177,6 +5282,418 @@ for b in blocks:
             fi
         done
     fi
+}
+
+# ============================================================================
+# Work Breakdown — Split specs into focused sub-tasks
+# ============================================================================
+
+# Format a sub-task issue body from task JSON + parent info
+# Args: $1=task_json, $2=task_index, $3=total_tasks, $4=parent_number, $5=parent_title, $6=parent_body
+_format_subtask_body() {
+    local task_json="$1"
+    local task_index="$2"
+    local total_tasks="$3"
+    local parent_number="$4"
+    local parent_title="$5"
+    local parent_body="$6"
+
+    python3 -c "
+import json, sys, re
+
+task = json.loads(sys.argv[1])
+idx = int(sys.argv[2])
+total = int(sys.argv[3])
+parent_num = sys.argv[4]
+parent_title = sys.argv[5]
+parent_body = sys.argv[6]
+
+title = task['title']
+context = task.get('context', '')
+items = task.get('items', [])
+scenarios = task.get('scenarios', [])
+test_notes = task.get('test_notes', '')
+
+# Extract relevant Gherkin scenarios from parent body
+scenario_blocks = []
+for sc_title in scenarios:
+    # Find scenario block in parent body (case-insensitive match on title)
+    pattern = r'(Scenario[^:]*:\s*' + re.escape(sc_title) + r'.*?)(?=\n\s*Scenario|\n##|\Z)'
+    match = re.search(pattern, parent_body, re.DOTALL | re.IGNORECASE)
+    if match:
+        scenario_blocks.append(match.group(1).strip())
+    else:
+        scenario_blocks.append(f'Scenario: {sc_title}')
+
+# Extract constraints from parent (Architecture, Security, Code structure sections)
+constraints = []
+for section in ['Architecture', 'Security', 'Code structure', 'Constraints', 'Engineering principles']:
+    pattern = r'##\s*' + section + r'\s*\n(.*?)(?=\n##|\Z)'
+    match = re.search(pattern, parent_body, re.DOTALL | re.IGNORECASE)
+    if match:
+        content = match.group(1).strip()
+        if content and content != 'N/A' and content != 'TBD':
+            constraints.append(f'### {section}\n{content}')
+
+body_parts = [
+    f'# {title}',
+    '',
+    '## Parent',
+    f'- Issue: #{parent_num} — {parent_title}',
+    f'- Task: {idx + 1} of {total}',
+    '',
+    '## Context',
+    context,
+    '',
+    '## What to implement',
+]
+for item in items:
+    body_parts.append(f'- {item}')
+
+body_parts.extend(['', '## Relevant scenarios'])
+if scenario_blocks:
+    body_parts.append('\`\`\`gherkin')
+    body_parts.append('\n\n'.join(scenario_blocks))
+    body_parts.append('\`\`\`')
+else:
+    body_parts.append('See parent issue for full Gherkin.')
+
+if constraints:
+    body_parts.extend(['', '## Constraints'])
+    body_parts.extend(constraints)
+
+if test_notes:
+    body_parts.extend(['', '## Test expectations', test_notes])
+
+print('\n'.join(body_parts))
+" "$task_json" "$task_index" "$total_tasks" "$parent_number" "$parent_title" "$parent_body"
+}
+
+# Rule-based breakdown fallback when LLM unavailable
+# Detects layers from spec keywords and creates one task per layer
+# Args: $1=parent_body, $2=parent_title
+# Output: JSON array of tasks to stdout
+_breakdown_rule_based() {
+    local parent_body="$1"
+    local parent_title="$2"
+
+    python3 -c "
+import json, sys, re
+
+body = sys.argv[1]
+title = sys.argv[2]
+body_lower = body.lower()
+
+# Detect layers from keywords
+layers = []
+if any(kw in body_lower for kw in ['model', 'schema', 'migration', 'database', 'table', 'column']):
+    layers.append({
+        'layer': 'data',
+        'title': f'Set up data storage for {title}',
+        'context': 'Create the data layer: models, schemas, and database changes.',
+        'keywords': ['model', 'schema', 'migration', 'database', 'table', 'column']
+    })
+if any(kw in body_lower for kw in ['api', 'endpoint', 'route', 'handler', 'service', 'controller']):
+    layers.append({
+        'layer': 'api',
+        'title': f'Add backend logic for {title}',
+        'context': 'Implement API endpoints, services, and business logic.',
+        'keywords': ['api', 'endpoint', 'route', 'handler', 'service', 'controller']
+    })
+if any(kw in body_lower for kw in ['component', 'page', 'frontend', 'template', 'view', 'ui', 'button', 'form', 'cli']):
+    layers.append({
+        'layer': 'frontend',
+        'title': f'Build the user interface for {title}',
+        'context': 'Implement frontend components, pages, or CLI commands.',
+        'keywords': ['component', 'page', 'frontend', 'template', 'view', 'ui', 'button', 'form', 'cli']
+    })
+if any(kw in body_lower for kw in ['test', 'spec', 'e2e', 'fixture']):
+    layers.append({
+        'layer': 'test',
+        'title': f'Add tests for {title}',
+        'context': 'Write unit, integration, and end-to-end tests.',
+        'keywords': ['test', 'spec', 'e2e', 'fixture']
+    })
+
+# If fewer than 3 layers detected, not enough for breakdown
+if len(layers) < 3:
+    print('SKIP')
+    sys.exit(0)
+
+# Extract all scenario titles
+scenario_titles = re.findall(r'Scenario[^:]*:\s*(.+)', body, re.IGNORECASE)
+
+# Distribute scenarios across layers (simple: all go to each layer)
+tasks = []
+for i, layer in enumerate(layers):
+    task = {
+        'title': layer['title'],
+        'context': layer['context'],
+        'items': [],
+        'scenarios': scenario_titles if layer['layer'] != 'test' else scenario_titles,
+        'depends_on': list(range(i)) if i > 0 else [],
+        'test_notes': 'See parent issue for test strategy' if layer['layer'] != 'test' else 'Implement all test cases from the test strategy section'
+    }
+    tasks.append(task)
+
+print(json.dumps(tasks))
+" "$parent_body" "$parent_title"
+}
+
+# Build the LLM prompt for work breakdown
+# Args: $1=parent_body, $2=parent_title, $3=agent_config_path
+_breakdown_llm_prompt() {
+    local parent_body="$1"
+    local parent_title="$2"
+    local agent_config="$3"
+
+    # Extract system prompt from agent config
+    local system_prompt
+    system_prompt=$(awk '/^## System prompt$/{f=1;next} /^## /{f=0} f' "$agent_config")
+
+    # Extract layer ordering
+    local layer_ordering
+    layer_ordering=$(awk '/^## Layer ordering$/{f=1;next} /^## /{f=0} f' "$agent_config")
+
+    # Extract limits
+    local max_tasks min_tasks
+    max_tasks=$(awk '/^## Max tasks$/{f=1;next} /^## /{f=0} f' "$agent_config" | tr -d '[:space:]')
+    min_tasks=$(awk '/^## Min tasks$/{f=1;next} /^## /{f=0} f' "$agent_config" | tr -d '[:space:]')
+    max_tasks="${max_tasks:-7}"
+    min_tasks="${min_tasks:-3}"
+
+    cat <<PROMPT
+${system_prompt}
+
+Layer priority (implement in this order):
+${layer_ordering}
+
+Constraints:
+- Minimum tasks: ${min_tasks}
+- Maximum tasks: ${max_tasks}
+- If fewer than ${min_tasks} natural tasks exist, output SKIP
+
+---
+
+SPECIFICATION TO BREAK DOWN:
+
+Title: ${parent_title}
+
+${parent_body}
+
+---
+
+Output ONLY valid JSON (array of task objects) or SKIP. No other text.
+PROMPT
+}
+
+# Main breakdown command
+cmd_breakdown() {
+    local issue_number=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            [0-9]*) issue_number="$1"; shift ;;
+            *) error "Usage: vault67 breakdown <issue-number>" ;;
+        esac
+    done
+
+    [ -z "$issue_number" ] && error "Usage: vault67 breakdown <issue-number>"
+    require_api_config
+
+    info "Fetching issue #${issue_number} for work breakdown..."
+
+    # Get issue from API
+    local api_response
+    api_response=$(api_get_issue "$issue_number")
+    local issue_title
+    issue_title=$(echo "$api_response" | extract_issue_title)
+    local issue_body
+    issue_body=$(echo "$api_response" | extract_issue_body)
+    local current_labels
+    current_labels=$(echo "$api_response" | extract_issue_labels)
+
+    info "Current labels: ${current_labels}"
+
+    # Validate state
+    if ! echo "$current_labels" | grep -q "state:READY_TO_IMPLEMENT"; then
+        error "Issue must be in state:READY_TO_IMPLEMENT (current: ${current_labels})"
+    fi
+
+    # Set transient BREAKDOWN state
+    info "Setting state to BREAKDOWN..."
+    api_replace_labels "$issue_number" "state:BREAKDOWN" > /dev/null
+
+    # Agent config
+    local agent_config="${SCRIPT_DIR}/agents/breakdown.md"
+    if [ ! -f "$agent_config" ]; then
+        warn "Agent config not found at ${agent_config}, using defaults"
+        agent_config=""
+    fi
+
+    # Try LLM breakdown, fall back to rule-based
+    local tasks_json=""
+    local breakdown_method="llm"
+
+    if [ -n "$agent_config" ]; then
+        local prompt
+        prompt=$(_breakdown_llm_prompt "$issue_body" "$issue_title" "$agent_config")
+
+        local llm_response
+        llm_response=$(_agent_llm_or_fallback "breakdown" "$prompt" "" "") || {
+            local rc=$?
+            if [ "$rc" -eq 1 ]; then
+                info "LLM unavailable, using rule-based breakdown..."
+                breakdown_method="rule-based"
+            else
+                # rc=2: only questions, revert state
+                api_replace_labels "$issue_number" "state:READY_TO_IMPLEMENT" > /dev/null
+                warn "Breakdown agent returned only questions — reverting to READY_TO_IMPLEMENT"
+                return 1
+            fi
+        }
+
+        if [ "$breakdown_method" = "llm" ] && [ -n "$llm_response" ]; then
+            # Check for SKIP
+            if echo "$llm_response" | grep -q '^SKIP$'; then
+                info "Spec too simple for breakdown — reverting to READY_TO_IMPLEMENT"
+                api_replace_labels "$issue_number" "state:READY_TO_IMPLEMENT" > /dev/null
+                return 0
+            fi
+
+            # Validate JSON
+            if echo "$llm_response" | python3 -c "import json, sys; json.load(sys.stdin)" 2>/dev/null; then
+                tasks_json="$llm_response"
+            else
+                warn "LLM returned invalid JSON, falling back to rule-based"
+                breakdown_method="rule-based"
+            fi
+        fi
+    else
+        breakdown_method="rule-based"
+    fi
+
+    # Rule-based fallback
+    if [ "$breakdown_method" = "rule-based" ] || [ -z "$tasks_json" ]; then
+        breakdown_method="rule-based"
+        tasks_json=$(_breakdown_rule_based "$issue_body" "$issue_title")
+
+        if [ "$tasks_json" = "SKIP" ]; then
+            info "Spec too simple for breakdown (fewer than 3 layers detected) — reverting"
+            api_replace_labels "$issue_number" "state:READY_TO_IMPLEMENT" > /dev/null
+            return 0
+        fi
+    fi
+
+    # Validate task count
+    local task_count
+    task_count=$(echo "$tasks_json" | python3 -c "import json, sys; print(len(json.load(sys.stdin)))")
+
+    if [ "$task_count" -lt 3 ]; then
+        info "Only ${task_count} tasks — too few for breakdown, reverting"
+        api_replace_labels "$issue_number" "state:READY_TO_IMPLEMENT" > /dev/null
+        return 0
+    fi
+
+    if [ "$task_count" -gt 7 ]; then
+        warn "LLM produced ${task_count} tasks (max 7) — spec may be too broad, proceeding anyway"
+    fi
+
+    info "Creating ${task_count} sub-tasks (method: ${breakdown_method})..."
+
+    # Create sub-task issues and collect their numbers
+    local subtask_numbers=()
+    local subtask_titles=()
+    local i=0
+
+    while [ "$i" -lt "$task_count" ]; do
+        # Extract single task JSON
+        local task_json
+        task_json=$(echo "$tasks_json" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)[$i]))" 2>/dev/null)
+        local task_title
+        task_title=$(echo "$task_json" | python3 -c "import json, sys; print(json.load(sys.stdin)['title'])")
+
+        # Format the issue body
+        local subtask_body
+        subtask_body=$(_format_subtask_body "$task_json" "$i" "$task_count" "$issue_number" "$issue_title" "$issue_body")
+
+        # Create the issue
+        local create_response
+        create_response=$(api_create_issue "$task_title" "$subtask_body")
+        local subtask_num
+        subtask_num=$(echo "$create_response" | extract_issue_number)
+
+        # Set labels: state:READY_TO_IMPLEMENT + type:subtask
+        api_replace_labels "$subtask_num" "state:READY_TO_IMPLEMENT" > /dev/null
+        api_add_label "$subtask_num" "type:subtask" > /dev/null
+
+        subtask_numbers+=("$subtask_num")
+        subtask_titles+=("$task_title")
+        success "  Created #${subtask_num}: ${task_title}"
+
+        i=$((i + 1))
+    done
+
+    # Set inter-task dependencies
+    info "Setting dependencies between sub-tasks..."
+    i=0
+    while [ "$i" -lt "$task_count" ]; do
+        local deps
+        deps=$(echo "$tasks_json" | python3 -c "
+import json, sys
+tasks = json.load(sys.stdin)
+deps = tasks[$i].get('depends_on', [])
+for d in deps:
+    print(d)
+" 2>/dev/null) || true
+
+        if [ -n "$deps" ]; then
+            while IFS= read -r dep_idx; do
+                if [ -n "$dep_idx" ] && [ "$dep_idx" -ge 0 ] 2>/dev/null && [ "$dep_idx" -lt "$task_count" ]; then
+                    local dep_num="${subtask_numbers[$dep_idx]}"
+                    api_add_dependency "${subtask_numbers[$i]}" "$dep_num" > /dev/null 2>&1 || true
+                fi
+            done <<< "$deps"
+        fi
+
+        i=$((i + 1))
+    done
+
+    # Set parent depends on ALL sub-tasks
+    info "Setting parent dependencies..."
+    for subtask_num in "${subtask_numbers[@]}"; do
+        api_add_dependency "$issue_number" "$subtask_num" > /dev/null 2>&1 || true
+    done
+
+    # Update parent: state:IMPLEMENTING + has:subtasks
+    api_replace_labels "$issue_number" "state:IMPLEMENTING" > /dev/null
+    api_add_label "$issue_number" "has:subtasks" > /dev/null
+
+    # Add summary comment to parent
+    local summary_table="## Work Breakdown\n\n"
+    summary_table+="| # | Sub-task | Issue |\n"
+    summary_table+="|---|----------|-------|\n"
+    i=0
+    while [ "$i" -lt "$task_count" ]; do
+        summary_table+="| $((i + 1)) | ${subtask_titles[$i]} | #${subtask_numbers[$i]} |\n"
+        i=$((i + 1))
+    done
+    summary_table+="\nBreakdown method: ${breakdown_method}\n"
+    summary_table+="Created via \`vault67 breakdown\`"
+
+    api_add_comment "$issue_number" "$(echo -e "$summary_table")" > /dev/null
+
+    echo ""
+    success "Breakdown complete! ${task_count} sub-tasks created for #${issue_number}"
+    echo ""
+    info "Sub-tasks:"
+    i=0
+    while [ "$i" -lt "$task_count" ]; do
+        echo "  #${subtask_numbers[$i]}: ${subtask_titles[$i]}"
+        i=$((i + 1))
+    done
+    echo ""
+    info "Next: vault67 implement ${subtask_numbers[0]}"
 }
 
 cmd_list() {
@@ -5354,6 +5871,7 @@ Usage:
   vault67 questions <issue-number>
   vault67 answer <issue-number>
   vault67 implement <issue-number> [--executor gastown] [--force]
+  vault67 breakdown <issue-number>
   vault67 check <issue-number>
   vault67 done <issue-number>
   vault67 delete <issue-number> [--force]
@@ -5374,6 +5892,7 @@ Commands:
   questions       Show blocking questions for an issue
   answer          Mark blocking questions as answered (HITL)
   implement       Hand off issue to Gas Town for implementation
+  breakdown       Split a READY_TO_IMPLEMENT issue into 3-7 focused sub-tasks
   check           Check if implementation already exists for an issue
   done            Mark issue as DONE, close it, report unblocked issues
   delete          Close an issue (with confirmation)
@@ -5388,6 +5907,7 @@ Examples:
   vault67 refine 42
   vault67 answer 42
   vault67 implement 42
+  vault67 breakdown 42        # Split #42 into focused sub-tasks
   vault67 check 42            # Check if #42 is already implemented
   vault67 list
   vault67 list --all
@@ -5422,6 +5942,9 @@ HELPEOF
             ;;
         implement)
             cmd_implement "$@"
+            ;;
+        breakdown)
+            cmd_breakdown "$@"
             ;;
         check)
             cmd_check "$@"
