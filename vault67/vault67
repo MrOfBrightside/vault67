@@ -3784,6 +3784,68 @@ The specification does not yet meet all Definition of Ready criteria. Please rev
 }
 
 
+# Questions command - show blocking questions for an issue
+cmd_questions() {
+    local issue_number=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -*) error "Unknown option: $1" ;;
+            *)
+                if [ -z "$issue_number" ]; then
+                    issue_number="$1"; shift
+                else
+                    error "Unexpected argument: $1"
+                fi ;;
+        esac
+    done
+
+    [ -z "$issue_number" ] && error "Issue number is required"
+    require_api_config
+
+    local api_response=$(api_get_issue "$issue_number")
+    local issue_title=$(echo "$api_response" | extract_issue_title)
+    local current_labels=$(echo "$api_response" | extract_issue_labels)
+
+    echo ""
+    echo -e "\033[1mIssue #${issue_number}\033[0m: ${issue_title}"
+    echo -e "  State: $(echo "$current_labels" | grep -o 'state:[^ ]*')"
+    echo ""
+
+    # Find the latest blocking questions comment
+    local comments_json=$(api_get_comments "$issue_number")
+    local questions=$(echo "$comments_json" | python3 -c "
+import sys, json
+comments = json.load(sys.stdin)
+# Find the latest blocking questions comment
+for c in reversed(comments):
+    body = c.get('body', '')
+    if '## Blocking questions' in body or 'Blocking Questions' in body:
+        # Extract just the questions
+        in_questions = False
+        for line in body.split('\n'):
+            stripped = line.strip()
+            if 'Blocking questions' in line or 'Blocking Questions' in line:
+                in_questions = True
+                continue
+            if in_questions and (stripped.startswith('## ') or stripped.startswith('**Next')):
+                break
+            if in_questions and stripped:
+                print(line)
+        break
+" 2>/dev/null)
+
+    if [ -z "$questions" ]; then
+        success "No blocking questions found for issue #${issue_number}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}Blocking questions:${NC}\n"
+    echo "$questions"
+    echo ""
+    info "To answer: post a comment on the issue, then run: vault67 answer ${issue_number}"
+}
+
 # Answer command - validate questions are answered and re-enable refinement
 cmd_answer() {
     local issue_number=""
@@ -5289,6 +5351,7 @@ Configuration:
 Usage:
   vault67 create --title "<title>" --repo "<path_or_url>" [--base-ref "main"]
   vault67 refine <issue-number>
+  vault67 questions <issue-number>
   vault67 answer <issue-number>
   vault67 implement <issue-number> [--executor gastown] [--force]
   vault67 check <issue-number>
@@ -5308,6 +5371,7 @@ Usage:
 Commands:
   create          Create a new issue on Forgejo with spec template
   refine          Run multi-agent refinement pipeline on an issue
+  questions       Show blocking questions for an issue
   answer          Mark blocking questions as answered (HITL)
   implement       Hand off issue to Gas Town for implementation
   check           Check if implementation already exists for an issue
@@ -5349,6 +5413,9 @@ HELPEOF
             ;;
         security_agent)
             cmd_security_agent "$@"
+            ;;
+        questions)
+            cmd_questions "$@"
             ;;
         answer)
             cmd_answer "$@"
