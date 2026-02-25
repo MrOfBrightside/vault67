@@ -813,17 +813,9 @@ CONCERN: <specific concern about a specific section>"
         if echo "$_judge_llm_response" | grep -qi '^PASS'; then
             dor_results+=("[x] $name")
         elif echo "$_judge_llm_response" | grep -q '^CONCERN:'; then
-            all_criteria_met=false
+            # Advisory only — LLM concerns are shown but don't block READY_TO_IMPLEMENT
             local _concern_summary=$(echo "$_judge_llm_response" | grep '^CONCERN:' | head -1 | sed 's/^CONCERN:[[:space:]]*//')
-            dor_results+=("[ ] $name (${_concern_summary})")
-            if [ -n "$question" ]; then
-                _judge_add_question "$questions_file" "$question"
-            fi
-            # Also add each concern as a separate question for specificity
-            while IFS= read -r _concern_line; do
-                local _ctext="${_concern_line#CONCERN: }"
-                _judge_add_question "$questions_file" "$_ctext"
-            done <<< "$(echo "$_judge_llm_response" | grep '^CONCERN:')"
+            dor_results+=("[~] $name (${_concern_summary})")
         else
             # Unparseable response — default to pass
             dor_results+=("[x] $name (LLM response unclear — structural checks passed)")
@@ -958,6 +950,8 @@ CONCERN: <specific concern about a specific section>"
     for result in "${dor_results[@]}"; do
         if [[ "$result" == "[x]"* ]]; then
             echo -e "  ${GREEN}✓${NC} ${result#[x] }"
+        elif [[ "$result" == "[~]"* ]]; then
+            echo -e "  ${YELLOW}⚠${NC} ${result#[~] }"
         else
             echo -e "  ${RED}✗${NC} ${result#[ ] }"
         fi
