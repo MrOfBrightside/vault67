@@ -5369,6 +5369,107 @@ print('\n'.join(body_parts))
 " "$task_json" "$task_index" "$total_tasks" "$parent_number" "$parent_title" "$parent_body"
 }
 
+# Format a promptpack comment for a sub-task
+# Extracts golden commands from parent, combines with sub-task context
+# Args: $1=task_json, $2=subtask_body, $3=parent_body
+_format_subtask_promptpack() {
+    local task_json="$1"
+    local subtask_body="$2"
+    local parent_body="$3"
+
+    python3 -c "
+import json, sys, re
+
+task = json.loads(sys.argv[1])
+subtask_body = sys.argv[2]
+parent_body = sys.argv[3]
+
+title = task['title']
+context = task.get('context', '')
+items = task.get('items', [])
+test_notes = task.get('test_notes', '')
+
+# Extract golden commands from parent
+golden_build = ''
+golden_test = ''
+for line in parent_body.split('\n'):
+    if 'Golden build command:' in line:
+        golden_build = line.split('Golden build command:')[-1].strip()
+    elif 'Golden test command:' in line:
+        golden_test = line.split('Golden test command:')[-1].strip()
+
+# Extract base ref from parent
+base_ref = 'main'
+m = re.search(r'Base ref:\s*\x60([^\x60]+)\x60', parent_body)
+if m:
+    base_ref = m.group(1)
+
+parts = [
+    '## \u2705 Ready for Implementation',
+    '',
+    'This sub-task has been pre-approved via parent issue refinement.',
+    '',
+    '<details>',
+    '<summary>Promptpack (click to expand)</summary>',
+    '',
+    '# Implementation Prompt Pack',
+    '',
+    '## Objective',
+    context,
+    '',
+    '## What to implement',
+]
+for item in items:
+    parts.append(f'- {item}')
+
+# Pull scenario section from sub-task body
+scenario_match = re.search(r'## Relevant scenarios\n(.*?)(?=\n## |\Z)', subtask_body, re.DOTALL)
+if scenario_match:
+    parts.extend(['', '## Acceptance criteria', scenario_match.group(1).strip()])
+
+# Pull constraints section from sub-task body
+constraint_match = re.search(r'## Constraints\n(.*?)(?=\n## |\Z)', subtask_body, re.DOTALL)
+if constraint_match:
+    parts.extend(['', '## Constraints and guardrails', constraint_match.group(1).strip()])
+
+parts.extend([
+    '',
+    '## Repo instructions',
+    f'### Base ref',
+    f'- {base_ref}',
+    '',
+    '### How to build (golden command)',
+    golden_build if golden_build else '(see parent issue)',
+    '',
+    '### How to test (golden command)',
+    golden_test if golden_test else '(see parent issue)',
+])
+
+if test_notes:
+    parts.extend(['', '## Test expectations', test_notes])
+
+parts.extend([
+    '',
+    '## Verification checklist',
+    '- [ ] All tests pass using golden commands',
+    '- [ ] Acceptance criteria satisfied',
+    '- [ ] No out-of-scope changes',
+    '',
+    '## Expected output',
+    '- Create a PR against base ref',
+    '- Include a brief PR description mapping changes to scenarios',
+    '- Include test results summary',
+    '',
+    '</details>',
+    '',
+    '**Next steps:**',
+    'Run: \x60vault67 implement <issue-number>\x60',
+])
+
+print('\n'.join(parts))
+" "$task_json" "$subtask_body" "$parent_body"
+}
+
 # Rule-based breakdown fallback when LLM unavailable
 # Detects layers from spec keywords and creates one task per layer
 # Args: $1=parent_body, $2=parent_title
@@ -5626,6 +5727,11 @@ cmd_breakdown() {
         # Set labels: state:READY_TO_IMPLEMENT + type:subtask
         api_replace_labels "$subtask_num" "state:READY_TO_IMPLEMENT" > /dev/null
         api_add_label "$subtask_num" "type:subtask" > /dev/null
+
+        # Post promptpack comment so implementers have a self-contained brief
+        local promptpack
+        promptpack=$(_format_subtask_promptpack "$task_json" "$subtask_body" "$issue_body")
+        api_add_comment "$subtask_num" "$promptpack" > /dev/null
 
         subtask_numbers+=("$subtask_num")
         subtask_titles+=("$task_title")
