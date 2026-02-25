@@ -10,6 +10,7 @@ You receive the complete spec. Your ONLY job is to identify fields that look fil
 4. Fabricated details that sound plausible but weren't derived from real user input
 
 You do NOT check structural completeness (that's handled by other criteria).
+Note: The ticket creator is assumed non-technical. Any questions generated from failed criteria should be answerable by a non-developer.
 For each problem found, output a CONCERN: line with the specific issue. If no problems, output PASS.
 
 ## Format Reference
@@ -41,7 +42,7 @@ For each problem found, output a CONCERN: line with the specific issue. If no pr
 - pattern: ^-[[:space:]]*[^[:space:]]
 - and_section: ### Out of scope
 - and_pattern: ^-[[:space:]]*[^[:space:]]
-- question: What is in scope for this work? Please list specific deliverables.
+- question: What specific features should be included in this work? What should definitely NOT be included?
 
 ### 2. Gherkin scenarios are present and testable
 - section: ## Acceptance Criteria (Gherkin)
@@ -73,7 +74,7 @@ For each problem found, output a CONCERN: line with the specific issue. If no pr
 - or_pattern: \| Scenario[[:space:]]*\|
 - and_pattern: (Unit|Integration|E2E|e2e) tests:
 - grep_range: 20
-- question: What test approach is needed? Which scenarios need unit vs integration vs e2e tests?
+- question: What are the most critical workflows that must work reliably? Are there areas where bugs would be especially problematic?
 
 ### 6. Repo golden commands known or explicitly blocked
 - section: ## Test strategy
@@ -94,13 +95,13 @@ For each problem found, output a CONCERN: line with the specific issue. If no pr
 - section: ## Code structure
 - pattern: - Module pattern:[[:space:]]*[^[:space:]]
 - grep_range: 10
-- question: What is the expected code structure? Which modules or patterns should be used?
+- question: Are there existing systems or features this needs to integrate with? Where does this feature fit in the product?
 
 ### 10. Engineering principles captured
 - section: ## Engineering principles and DoD additions
 - pattern: ^-[[:space:]]*[^[:space:]]
 - grep_range: 15
-- question: What engineering principles or definition-of-done criteria apply to this work?
+- question: Are there specific quality expectations? (e.g., must handle many users at once, must load quickly, must work offline)
 
 ### 11. Fields contain distinct content
 - special: check_duplicate_fields

@@ -15,7 +15,17 @@ Reason about the specific feature:
 - Note if the feature might require new infrastructure not present in the current stack
 - Consider how the feature fits into the existing module boundaries
 
-If the detected stack seems mismatched with what the spec requires, or if key architectural decisions cannot be inferred, output QUESTION: lines.
+CRITICAL: The ticket creator is assumed NON-TECHNICAL. When generating QUESTION: lines:
+- Ask about WHAT they want, not HOW to build it
+- Use plain language, no jargon (no "WebSocket", "microservice", "REST endpoint")
+- YOU are the architect — decide technical approaches yourself
+- Only ask about product/business intent you genuinely cannot infer
+- BAD: "Should we use WebSockets or SSE for real-time updates?"
+- GOOD: "Should users see updates instantly (like a chat), or is refreshing the page acceptable?"
+- BAD: "What module boundaries should this feature respect?"
+- GOOD: "Is this a standalone feature or does it need to work together with existing features?"
+
+If the detected stack seems mismatched with what the spec requires, or if key architectural decisions cannot be inferred, output QUESTION: lines — but phrase them so a non-developer can answer.
 
 ## Constraints
 # Project-specific rules the owner wants enforced.

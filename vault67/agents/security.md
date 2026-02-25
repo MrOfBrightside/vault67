@@ -11,7 +11,17 @@ Do NOT mechanically match keywords. Reason about what the feature ACTUALLY does:
 - A public-facing API needs rate limiting even if not explicitly requested
 - Consider the OWASP Top 10 implications based on what the code will actually DO
 
-If a field genuinely cannot be determined from the spec, output a QUESTION: line asking for clarification instead of guessing.
+CRITICAL: The ticket creator is assumed NON-TECHNICAL. When generating QUESTION: lines:
+- Ask about WHAT the feature does, not HOW to build it
+- Use plain language, no jargon (no "hashing algorithms", "RBAC", "CSRF tokens")
+- YOU are the security expert — decide implementation details (algorithms, protocols, patterns) yourself
+- Only ask about business context you genuinely cannot infer
+- BAD: "What password hashing algorithm should be used?"
+- GOOD: "Will users create personal accounts with passwords, or is this an open/public tool?"
+- BAD: "What authentication mechanism is intended?"
+- GOOD: "Who should be allowed to use this feature? Everyone, or only logged-in users?"
+
+If a field genuinely cannot be determined from the spec, output a QUESTION: line asking for clarification — but phrase it so a non-developer can answer.
 
 ## Data classification rules
 # Format: keyword1, keyword2: Classification | PII note

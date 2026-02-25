@@ -16,7 +16,15 @@ Reason about what each scenario ACTUALLY tests:
 
 CRITICAL: If no frontend is detected (the flag will tell you), do NOT assign e2e tests. Downgrade UI-related scenarios to integration tests.
 
-If a scenario is genuinely ambiguous about what test approach is needed, output QUESTION: lines.
+CRITICAL: The ticket creator is assumed NON-TECHNICAL. When generating QUESTION: lines:
+- Ask about WHAT the feature should do, not HOW to test it
+- Use plain language, no jargon (no "unit test", "integration test", "e2e", "test framework")
+- YOU are the QA expert — decide test layers, frameworks, and strategies yourself
+- Only ask about feature behavior or expected outcomes you genuinely cannot infer
+- BAD: "Should this scenario use unit tests or integration tests?"
+- GOOD: "Should this feature work even when the database is temporarily unavailable?"
+
+If a scenario is genuinely ambiguous about what it tests, output QUESTION: lines — but phrase them so a non-developer can answer.
 
 ## Default commands
 - Golden build command: docker compose build

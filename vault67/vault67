@@ -1434,7 +1434,7 @@ DETECTED_STACK: <confirmed stack, noting relevance to this feature>
 RELEVANT_MODULES: <which paths/modules are most relevant to this feature and why>
 CONSTRAINTS: <architecture constraints relevant to this specific feature>
 CONCERNS: <any architectural concerns or gaps, or None>
-QUESTION: <only if genuinely needed>"
+QUESTION: <only if you genuinely need business/product clarification — phrase in plain language a non-developer can answer>"
 
         local _arch_llm_result=0
         local _arch_llm_response
@@ -1718,7 +1718,7 @@ IMPORT_RULES: <import rules>
 SUGGESTED_FILES: <where new files should go for this feature, comma-separated paths>
 MAX_FILE_LENGTH: <threshold in lines>
 NOTES: <structural concerns or recommendations specific to this feature>
-QUESTION: <only if you genuinely cannot provide guidance>"
+QUESTION: <only if you genuinely need business/product clarification — phrase in plain language a non-developer can answer>"
 
         local _ld_llm_result=0
         local _ld_llm_response
@@ -1931,7 +1931,7 @@ AUTHN_AUTHZ: <authentication and authorization requirements>
 LOGGING_AUDIT: <logging and audit requirements>
 SECURITY_CONSTRAINTS: <semicolon-separated list of specific security constraints>
 OWASP_RELEVANT: <applicable OWASP IDs with brief mitigation, or None identified>
-QUESTION: <only if you genuinely cannot determine a field — one QUESTION: per line>"
+QUESTION: <only if you genuinely need business/product clarification — phrase in plain language a non-developer can answer>"
 
         local _sec_llm_result=0
         local _sec_llm_response
@@ -2476,18 +2476,18 @@ _write_enrichment_questions() {
 
 ## Blocking questions
 
-1) Question: What specific problem does "${title}" solve? What is the current state that needs to change?
+1) Question: What problem does "${title}" solve? What is frustrating or broken today that this would fix?
    Answer:
 
-2) Question: What are the concrete requirements for "${title}"? List at least 3 specific, verifiable conditions.
+2) Question: When "${title}" is done, how will a user know it works? Describe what they should be able to do.
    Answer:
 
-3) Question: What should be in scope vs out of scope for this work? Be specific about deliverables.
+3) Question: What specific features should be included? What should definitely NOT be included?
    Answer:
 
 ## Notes
-- The spec fields were too thin or duplicated for the pipeline to refine automatically
-- Please provide distinct answers — context (why), goal (what), requirements (how to verify)
+- The description was too brief for the pipeline to work with
+- Please answer in your own words — technical jargon is not needed
 QEOF
     warn "Blocking questions written — ticket needs human input"
 }
@@ -3228,7 +3228,7 @@ QUALITY_GATES:
 - <gate 2>
 (specific to this feature's tech stack)
 
-QUESTION: <only if a scenario is genuinely ambiguous>"
+QUESTION: <only if you genuinely need business/product clarification — phrase in plain language a non-developer can answer>"
 
         local _ts_llm_result=0
         local _ts_llm_response

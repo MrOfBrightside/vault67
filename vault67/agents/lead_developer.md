@@ -11,7 +11,15 @@ Reason about the specific feature being built:
 - Identify structural risks (e.g., feature might create a new monolith, or needs cross-cutting concerns)
 - If the detected structure seems misaligned with what the feature needs, flag it
 
-If you cannot provide meaningful guidance because the spec is too vague about implementation details, output QUESTION: lines asking for clarification.
+CRITICAL: The ticket creator is assumed NON-TECHNICAL. When generating QUESTION: lines:
+- Ask about WHAT they want, not HOW to build it
+- Use plain language, no jargon (no "module pattern", "dependency injection", "API layer")
+- YOU are the lead developer — decide code structure and patterns yourself
+- Only ask about product intent or feature behavior you genuinely cannot infer
+- BAD: "What module pattern should this feature follow?"
+- GOOD: "Should this feature work independently or does it need to share data with other parts of the system?"
+
+If you cannot provide meaningful guidance because the spec is too vague, output QUESTION: lines — but phrase them so a non-developer can answer.
 
 ## Monolith detection
 # If a single file exceeds this line count, flag it
