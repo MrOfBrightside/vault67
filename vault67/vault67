@@ -654,7 +654,7 @@ judge_agent() {
         # reject_pattern: if matches, override pass to fail
         local _reject_reason=""
         if [ "$pass" = true ] && [ -n "$reject_pattern" ]; then
-            if echo "$section_content" | grep -qiE -- "$reject_pattern" 2>/dev/null; then
+            if echo "$section_content" | grep -qE -- "$reject_pattern" 2>/dev/null; then
                 pass=false
                 _reject_reason="generic placeholders detected"
             fi
@@ -720,8 +720,8 @@ judge_agent() {
         local name="$1"
         local question="$2"
         local context goal requirements scope_in
-        context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
-        goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
+        context=$(echo "$spec_content" | sed -n '/^## Context/,/^## /p' | sed '1d;$d')
+        goal=$(echo "$spec_content" | sed -n '/^## Goal/,/^## /p' | sed '1d;$d')
         requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
         scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
 
@@ -754,13 +754,13 @@ judge_agent() {
         local min_sub="${2:-4}"
         local question="$3"
         local context goal requirements
-        context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
-        goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
+        context=$(echo "$spec_content" | sed -n '/^## Context/,/^## /p' | sed '1d;$d')
+        goal=$(echo "$spec_content" | sed -n '/^## Goal/,/^## /p' | sed '1d;$d')
         requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
 
         local _substance_lines
         _substance_lines=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
-            grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification' | \
+            grep -vE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|\bTODO\b|\bTBD\b|[Tt]o be determined|[Tt]o be defined|[Nn]eeds clarification' | \
             grep -c '[[:alnum:]]' 2>/dev/null) || _substance_lines=0
         if [ "$_substance_lines" -lt "$min_sub" ]; then
             all_criteria_met=false
@@ -1156,8 +1156,8 @@ generate_promptpack() {
     local base_ref=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^base_ref:' | awk '{print $2}')
 
     # Extract sections from spec.md
-    local context=$(sed -n '/^## Context$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local goal=$(sed -n '/^## Goal$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local context=$(sed -n '/^## Context/,/^##/p' "$spec_file" | sed '1d;$d')
+    local goal=$(sed -n '/^## Goal/,/^##/p' "$spec_file" | sed '1d;$d')
     local scope_in=$(sed -n '/^### In scope$/,/^###/p' "$spec_file" | sed '1d;$d')
     local scope_out=$(sed -n '/^### Out of scope$/,/^##/p' "$spec_file" | sed '1d;$d')
     local gherkin=$(sed -n '/^## Acceptance Criteria (Gherkin)$/,/^##/p' "$spec_file" | sed '1d;$d')
@@ -1405,8 +1405,8 @@ architecture_compliance_agent() {
 
     if [ -n "$_arch_system_prompt" ]; then
         local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
-        local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-        local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local context=$(sed -n '/^## Context/,/^## /p' "$spec_file" | sed '1d;$d')
+        local goal=$(sed -n '/^## Goal/,/^## /p' "$spec_file" | sed '1d;$d')
 
         # Load constraint rules from config
         local default_constraints=""
@@ -1686,8 +1686,8 @@ lead_developer_agent() {
 
     if [ -n "$_ld_system_prompt" ]; then
         local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
-        local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-        local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local context=$(sed -n '/^## Context/,/^## /p' "$spec_file" | sed '1d;$d')
+        local goal=$(sed -n '/^## Goal/,/^## /p' "$spec_file" | sed '1d;$d')
         local gherkin=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '1d;$d')
 
         # Load error handling rules as additional domain knowledge
@@ -1904,8 +1904,8 @@ security_compliance_agent() {
 
     if [ -n "$_sec_system_prompt" ]; then
         local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
-        local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-        local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local context=$(sed -n '/^## Context/,/^## /p' "$spec_file" | sed '1d;$d')
+        local goal=$(sed -n '/^## Goal/,/^## /p' "$spec_file" | sed '1d;$d')
         local requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
         local arch_section=$(sed -n '/^## Architecture alignment$/,/^## /p' "$spec_file" | sed '1d;$d')
 
@@ -2264,11 +2264,11 @@ spec_enrichment_agent() {
 
     info "Running Spec Enrichment Agent..."
 
-    # Extract core fields
-    local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-    local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    # Extract core fields (no $ anchor — API may return trailing whitespace/\r)
+    local context=$(sed -n '/^## Context/,/^## /p' "$spec_file" | sed '1d;$d')
+    local goal=$(sed -n '/^## Goal/,/^## /p' "$spec_file" | sed '1d;$d')
     local requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
-    local scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
+    local scope_in=$(sed -n '/^### In scope/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
     local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
 
     # Count substantive lines (reuse judge's logic)
@@ -2277,10 +2277,10 @@ spec_enrichment_agent() {
     if [ -f "$rules_file" ]; then
         placeholder_pattern=$(awk '/^## Placeholder patterns$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file" | paste -sd '|' -)
     fi
-    [ -z "$placeholder_pattern" ] && placeholder_pattern="^[[:space:]]*$|TODO|TBD|placeholder"
+    [ -z "$placeholder_pattern" ] && placeholder_pattern="^[[:space:]]*$|\bTODO\b|\bTBD\b|\bplaceholder\b"
 
     local _enrich_substance=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
-        grep -viE "$placeholder_pattern" | \
+        grep -vE "$placeholder_pattern" | \
         grep -c '[[:alnum:]]')
 
     # Check for cross-field duplication
@@ -2395,7 +2395,7 @@ IN_SCOPE:
 
     # Validate expansion actually added substance
     local _new_substance=$(printf '%s\n%s\n%s' "$new_context" "$new_goal" "$new_requirements" | \
-        grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|TODO|TBD|to be determined' | \
+        grep -vE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|\bTODO\b|\bTBD\b|[Tt]o be determined' | \
         grep -c '[[:alnum:]]')
 
     if [ "$_new_substance" -lt 4 ]; then
@@ -2513,7 +2513,7 @@ ba_translator_agent() {
     if [ -f "$rules_file" ]; then
         reject_pattern=$(awk '/^## Reject patterns$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file" | head -1)
     fi
-    [ -z "$reject_pattern" ] && reject_pattern="works as specified|TODO|TBD|placeholder"
+    [ -z "$reject_pattern" ] && reject_pattern="works as specified|\bTODO\b|\bTBD\b|\bplaceholder\b"
 
     local prompt_rules=""
     if [ -f "$rules_file" ]; then
@@ -2523,14 +2523,17 @@ ba_translator_agent() {
     # Check if Gherkin already has substantive content (not placeholder)
     local gherkin_block=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$gherkin_block" | grep -q "Scenario:" && \
-       ! echo "$gherkin_block" | grep -qiE "$reject_pattern"; then
+       echo "$gherkin_block" | grep -qE "Given .+" && \
+       echo "$gherkin_block" | grep -qE "When .+" && \
+       echo "$gherkin_block" | grep -qE "Then .+" && \
+       ! echo "$gherkin_block" | grep -qE "$reject_pattern"; then
         success "Gherkin scenarios already contain substantive content - preserving"
         return 0
     fi
 
     # Extract key sections from spec.md for the prompt
-    local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-    local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local context=$(sed -n '/^## Context/,/^## /p' "$spec_file" | sed '1d;$d')
+    local goal=$(sed -n '/^## Goal/,/^## /p' "$spec_file" | sed '1d;$d')
     local requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
     local scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
     local scope_out=$(sed -n '/^### Out of scope$/,/^## /p' "$spec_file" | sed '1d;$d')
@@ -2679,7 +2682,7 @@ else:
     fi
 
     # Final safety check: reject if LLM produced placeholder-like content
-    if echo "$clean_gherkin" | grep -qiE "$reject_pattern"; then
+    if echo "$clean_gherkin" | grep -qE "$reject_pattern"; then
         warn "LLM produced placeholder-like Gherkin — keeping existing"
         return 1
     fi
@@ -2853,8 +2856,8 @@ engineering_principles_agent() {
     fi
 
     # Extract spec sections for context
-    local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-    local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local context=$(sed -n '/^## Context/,/^## /p' "$spec_file" | sed '1d;$d')
+    local goal=$(sed -n '/^## Goal/,/^## /p' "$spec_file" | sed '1d;$d')
     local arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
     local security_section=$(sed -n '/^## Security and compliance/,/^## /p' "$spec_file" | sed '1d;$d')
     local test_section=$(sed -n '/^## Test strategy/,/^## /p' "$spec_file" | sed '1d;$d')
@@ -3507,8 +3510,8 @@ cmd_refine() {
     local repo_context_file="$temp_dir/repo_context.md"
     local questions_file="$temp_dir/questions.md"
 
-    # Write issue body to temporary spec file
-    echo "$issue_body" > "$spec_file"
+    # Write issue body to temporary spec file (strip \r from API responses)
+    echo "$issue_body" | tr -d '\r' > "$spec_file"
 
     # Ensure the spec heading uses the real issue title (not generic "Specification")
     if grep -q "^# Specification$" "$spec_file"; then
@@ -3829,14 +3832,86 @@ cmd_answer() {
         return 0
     fi
 
-    # Get comments to check if answers were provided
+    # Get the issue body and comments
+    local issue_body=$(echo "$api_response" | extract_issue_body)
+    local issue_title=$(echo "$api_response" | extract_issue_title)
+
     info "Checking for answers in comments..."
-    local comments=$(api_get_comments "$issue_number")
-    
-    # Simple check: if there are comments after the blocking questions comment, assume answers provided
-    # (In a more sophisticated version, we could parse the comments to verify answers)
-    
-    info "Answers appear to have been provided in comments"
+    local comments_json=$(api_get_comments "$issue_number")
+
+    # Extract the latest non-bot comment as answers (skip system comments)
+    local answers=$(echo "$comments_json" | python3 -c "
+import sys, json
+comments = json.load(sys.stdin)
+# Find the last comment that looks like user answers (not a bot status comment)
+for c in reversed(comments):
+    body = c.get('body', '')
+    # Skip bot/system comments
+    if body.startswith('## ⚠️') or body.startswith('## ✅'):
+        continue
+    # This is likely the answers
+    print(body)
+    break
+" 2>/dev/null)
+
+    if [ -z "$answers" ]; then
+        warn "No answer comments found. Please add a comment with answers to the blocking questions."
+        return 1
+    fi
+
+    info "Found answers, incorporating into spec..."
+
+    # Use LLM to incorporate answers into the spec body
+    local incorporate_prompt="You are a specification editor. You receive a spec template and user-provided answers to blocking questions.
+
+Your job is to incorporate the answers into the correct spec sections. Fill in the sections with the answer content — do NOT leave placeholder text.
+
+CURRENT SPEC BODY:
+${issue_body}
+
+ANSWERS PROVIDED:
+${answers}
+
+RULES:
+- Replace placeholder text in ## Context with the problem description from the answers
+- Replace placeholder text in ## Goal with the goal/outcome from the answers
+- Replace placeholder items in ### In scope with the scope items from the answers
+- Replace placeholder items in ### Out of scope with the out-of-scope items from the answers
+- Replace placeholder items in ## Requirements with the requirements from the answers
+- Keep all other sections (Architecture, Security, etc.) unchanged — agents will fill those
+- Keep the # heading, **Metadata:** block, and ## Definition of Done/Ready exactly as-is
+- Output the COMPLETE updated spec body, nothing else — no markdown fences, no commentary"
+
+    local updated_body
+    updated_body=$(ollama_generate "$incorporate_prompt" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$updated_body" ]; then
+        # Fallback: simple injection — put answers into Context section
+        warn "LLM unavailable — injecting answers into Context section directly"
+        updated_body=$(echo "$issue_body" | sed "/^## Context/,/^## /{
+            /^## Context/!{
+                /^## /!d
+            }
+        }" | sed "/^## Context/a\\
+\\
+${answers}
+")
+    fi
+
+    # Strip markdown fences if LLM wrapped them
+    updated_body=$(echo "$updated_body" | sed '/^```\(markdown\)\{0,1\}$/d')
+
+    # Verify the updated body still has key structural elements
+    if ! echo "$updated_body" | grep -q "^## Context" || ! echo "$updated_body" | grep -q "^## Goal"; then
+        warn "LLM output missing key sections — falling back to direct injection"
+        # Fallback: append answers after Context header
+        updated_body=$(printf '%s\n\n## User Answers\n%s' "$issue_body" "$answers")
+    fi
+
+    # Update the issue body on Forgejo
+    info "Updating issue body with incorporated answers..."
+    api_update_issue "$issue_number" "$updated_body" > /dev/null
+    success "Answers incorporated into spec"
 
     # Update label to REFINING
     info "Updating state to REFINING..."
@@ -3844,9 +3919,9 @@ cmd_answer() {
     success "State updated to REFINING - ready for refinement pipeline"
 
     # Add a status comment
-    local comment_body="## ✅ Answers Provided
+    local comment_body="## ✅ Answers Incorporated
 
-State changed from NEEDS_INFO to REFINING. The refinement pipeline can now re-run.
+Answers from comments have been incorporated into the spec body. State changed to REFINING.
 
 **Next steps:**
 Run: \`vault67 refine ${issue_number}\`"

@@ -3,7 +3,7 @@
 ## Reject patterns
 # Pipe-separated list of phrases that indicate placeholder/garbage Gherkin content.
 # Used to detect when existing scenarios need regeneration.
-works as specified|works as expected|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct
+works as specified|works as expected|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|\bTODO\b|\bTBD\b|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|\bplaceholder\b|the system works correctly|it should work|the result is correct
 
 ## Prompt rules
 # Guidelines the LLM must follow when generating Gherkin scenarios.

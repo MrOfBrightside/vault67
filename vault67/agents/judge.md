@@ -50,7 +50,7 @@ For each problem found, output a CONCERN: line with the specific issue. If no pr
 - and_pattern: Given\s+\w
 - and_pattern: When\s+\w
 - and_pattern: Then\s+\w
-- reject_pattern: works as expected|works as specified|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct
+- reject_pattern: works as expected|works as specified|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|\bTODO\b|\bTBD\b|\bto be determined\b|\bto be defined\b|\bneeds clarification\b|prerequisites are defined|actions are specified|expected outcomes are documented|\bplaceholder\b|the system works correctly|it should work|the result is correct
 - min_matches: Scenario: 2
 - question: What are the key user scenarios? Please describe at least 2 concrete workflows with expected outcomes.
 

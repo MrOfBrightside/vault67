@@ -8,11 +8,11 @@
 ^Why is this needed
 ^What must be true
 ^What problem
-TODO
-TBD
-to be determined
-to be defined
-needs clarification
+\bTODO\b
+\bTBD\b
+[Tt]o be determined
+[Tt]o be defined
+[Nn]eeds clarification
 Part of project:
 Project scope:
 
