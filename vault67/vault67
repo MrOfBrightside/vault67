@@ -122,6 +122,11 @@ extract_issue_labels() {
     python3 -c "import sys, json; print(' '.join([label['name'] for label in json.load(sys.stdin)['labels']]))"
 }
 
+# Extract issue title from API response
+extract_issue_title() {
+    python3 -c "import sys, json; print(json.load(sys.stdin)['title'])"
+}
+
 # Create a new issue
 # Args: title, body
 api_create_issue() {
@@ -371,7 +376,7 @@ cmd_create() {
     info "Base ref: $base_ref"
 
     # Build issue body with spec template
-    local issue_body="# Specification
+    local issue_body="# ${title}
 
 **Metadata:**
 - Repo: \`${repo}\`
@@ -3480,8 +3485,9 @@ cmd_refine() {
     # Get issue from API
     local api_response=$(api_get_issue "$issue_number")
     local issue_body=$(echo "$api_response" | extract_issue_body)
+    local issue_title=$(echo "$api_response" | extract_issue_title)
     local current_labels=$(echo "$api_response" | extract_issue_labels)
-    
+
     info "Current labels: ${current_labels}"
     
     # Check if issue is in valid state for refinement
@@ -3503,6 +3509,11 @@ cmd_refine() {
 
     # Write issue body to temporary spec file
     echo "$issue_body" > "$spec_file"
+
+    # Ensure the spec heading uses the real issue title (not generic "Specification")
+    if grep -q "^# Specification$" "$spec_file"; then
+        sed -i '' "1s/^# Specification$/# ${issue_title}/" "$spec_file"
+    fi
 
     # Ensure all required spec sections exist (user-created issues may omit template sections)
     local required_sections=(
@@ -4017,7 +4028,7 @@ cmd_delete() {
         error "Issue #${issue_number} not found"
     }
 
-    local issue_title=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
+    local issue_title=$(echo "$api_response" | extract_issue_title)
     local issue_state=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])")
     local labels=$(echo "$api_response" | extract_issue_labels)
 
@@ -4059,7 +4070,7 @@ _translate_project_issue() {
     local project_name=$(echo "$raw_text" | grep "Created from project:" | sed 's/.*\*\*\(.*\)\*\*/\1/')
     local project_prompt=$(echo "$raw_text" | sed -n 's/^> //p' | head -1)
 
-    local spec_body="# Specification
+    local spec_body="# ${issue_title}
 
 **Metadata:**
 - Repo: \`https://git.logikfabriken.se/${FORGEJO_REPO}.git\`
@@ -4167,10 +4178,10 @@ cmd_translate() {
     info "Fetching issue #${issue_number}..."
     local api_response=$(api_get_issue "$issue_number")
     local issue_body=$(echo "$api_response" | extract_issue_body)
-    local issue_title=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
+    local issue_title=$(echo "$api_response" | extract_issue_title)
 
-    # Check if already has spec structure
-    if echo "$issue_body" | grep -q "^# Specification"; then
+    # Check if already has spec structure (title-based heading or legacy "Specification")
+    if echo "$issue_body" | grep -q "^# " && echo "$issue_body" | grep -q "^## Context"; then
         info "Issue #${issue_number} already has spec structure - skipping translate"
         return 0
     fi
@@ -4251,7 +4262,7 @@ cmd_translate() {
     [ -z "$in_scope" ] && in_scope="- $issue_title"
 
     # Build spec with questions embedded
-    local spec_body="# Specification
+    local spec_body="# ${issue_title}
 
 **Metadata:**
 - Repo: \`https://git.logikfabriken.se/${FORGEJO_REPO}.git\`
