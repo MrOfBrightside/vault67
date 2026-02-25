@@ -20,6 +20,12 @@ Project scope:
 # Minimum number of substantive lines (non-placeholder) required.
 4
 
+## Minimum user substance
+# Below this threshold, the spec is considered "very thin" — too little real
+# user input for an LLM to expand safely. Questions are generated instead.
+# At or above this (but below substance threshold), LLM expansion is attempted.
+2
+
 ## Prompt rules
 # Guidelines the LLM must follow when expanding thin specs.
 # One rule per line, prefixed with number and period.

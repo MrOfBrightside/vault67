@@ -1,5 +1,18 @@
 # Security Agent Rules
 
+## System prompt
+You are a Security Architect reviewing a software specification for security and compliance implications.
+
+Given the specification and its Gherkin acceptance criteria, determine the correct values for data classification, authentication/authorization requirements, logging needs, PII/secrets handling, and security constraints.
+
+Do NOT mechanically match keywords. Reason about what the feature ACTUALLY does:
+- A "meeting booker" mentions "user" but may not handle PII if it only stores meeting times
+- An "admin dashboard" may need RBAC even if the word "permission" does not appear
+- A public-facing API needs rate limiting even if not explicitly requested
+- Consider the OWASP Top 10 implications based on what the code will actually DO
+
+If a field genuinely cannot be determined from the spec, output a QUESTION: line asking for clarification instead of guessing.
+
 ## Data classification rules
 # Format: keyword1, keyword2: Classification | PII note
 - user, account, profile, personal, password, email, phone, address: CONFIDENTIAL - Contains user personal data | Contains PII - must be encrypted at rest and in transit
@@ -77,3 +90,12 @@ Input validation required; keep dependencies up-to-date and scan for vulnerabili
 - pin, version, semver, range: Pin dependencies to exact versions or narrow ranges in production; avoid wildcard or latest tags; review version bumps in pull requests
 - registry, npm, pypi, crates, maven, dockerhub: Use trusted registries only; configure scoped registries for private packages; enable package provenance verification where available
 - sbom, provenance, attestation, signing: Generate SBOM for all releases; verify package signatures and provenance attestations; maintain an inventory of all third-party components
+
+## Boilerplate defaults
+# When existing security section values match these defaults AND the spec
+# contains contradicting keywords, re-evaluate instead of preserving.
+# Format: field_value_substring | contradicting_keywords (comma-separated)
+PUBLIC | user, account, profile, personal, password, email, phone, address, payment, card, credit, login, authenticate
+No PII | user, account, profile, personal, email, phone, address, password
+No authentication required | login, authenticate, sign_in, user, account, admin, role, permission, api, token
+Standard application logging | login, authenticate, access, permission, admin, payment, transaction

@@ -713,6 +713,7 @@ judge_agent() {
     # --- Special check: duplicate fields ---
     _judge_check_duplicate_fields() {
         local name="$1"
+        local question="$2"
         local context goal requirements scope_in
         context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
         goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
@@ -734,6 +735,9 @@ judge_agent() {
         if [ "$_dup_count" -ge 2 ]; then
             all_criteria_met=false
             dor_results+=("[ ] $name (context duplicated in $_dup_count other fields)")
+            if [ -n "$question" ]; then
+                _judge_add_question "$questions_file" "$question"
+            fi
         else
             dor_results+=("[x] $name")
         fi
@@ -743,6 +747,7 @@ judge_agent() {
     _judge_check_substance_threshold() {
         local name="$1"
         local min_sub="${2:-4}"
+        local question="$3"
         local context goal requirements
         context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
         goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
@@ -755,8 +760,68 @@ judge_agent() {
         if [ "$_substance_lines" -lt "$min_sub" ]; then
             all_criteria_met=false
             dor_results+=("[ ] $name (only $_substance_lines substantive lines, need at least $min_sub)")
+            if [ -n "$question" ]; then
+                _judge_add_question "$questions_file" "$question"
+            fi
         else
             dor_results+=("[x] $name")
+        fi
+    }
+
+    # --- Special check: LLM substance evaluation ---
+    _judge_llm_substance_check() {
+        local name="$1"
+        local question="$2"
+
+        local _judge_system_prompt=""
+        [ -f "$rules_file" ] && _judge_system_prompt=$(awk '/^## System prompt$/{f=1;next} /^## /{f=0} f' "$rules_file")
+
+        if [ -z "$_judge_system_prompt" ]; then
+            # No system prompt in judge.md — skip this check
+            dor_results+=("[x] $name (LLM config not found — skipped)")
+            return
+        fi
+
+        local _judge_prompt="${_judge_system_prompt}
+
+FULL SPECIFICATION:
+${spec_content}
+
+OUTPUT FORMAT:
+Either output exactly:
+PASS
+Or output one or more lines:
+CONCERN: <specific concern about a specific section>"
+
+        local _judge_llm_response
+        _judge_llm_response=$(ollama_generate "$_judge_prompt" 2>/dev/null) || {
+            # LLM unavailable — auto-pass (structural checks are the real gate)
+            dor_results+=("[x] $name (LLM unavailable — structural checks passed)")
+            return
+        }
+
+        if [ -z "$_judge_llm_response" ]; then
+            dor_results+=("[x] $name (LLM empty response — structural checks passed)")
+            return
+        fi
+
+        if echo "$_judge_llm_response" | grep -qi '^PASS'; then
+            dor_results+=("[x] $name")
+        elif echo "$_judge_llm_response" | grep -q '^CONCERN:'; then
+            all_criteria_met=false
+            local _concern_summary=$(echo "$_judge_llm_response" | grep '^CONCERN:' | head -1 | sed 's/^CONCERN:[[:space:]]*//')
+            dor_results+=("[ ] $name (${_concern_summary})")
+            if [ -n "$question" ]; then
+                _judge_add_question "$questions_file" "$question"
+            fi
+            # Also add each concern as a separate question for specificity
+            while IFS= read -r _concern_line; do
+                local _ctext="${_concern_line#CONCERN: }"
+                _judge_add_question "$questions_file" "$_ctext"
+            done <<< "$(echo "$_judge_llm_response" | grep '^CONCERN:')"
+        else
+            # Unparseable response — default to pass
+            dor_results+=("[x] $name (LLM response unclear — structural checks passed)")
         fi
     }
 
@@ -776,10 +841,13 @@ judge_agent() {
                     _judge_check_blocking_questions "$cur_name"
                     ;;
                 check_duplicate_fields)
-                    _judge_check_duplicate_fields "$cur_name"
+                    _judge_check_duplicate_fields "$cur_name" "$cur_question"
                     ;;
                 check_substance_threshold)
-                    _judge_check_substance_threshold "$cur_name" "$cur_min_substance"
+                    _judge_check_substance_threshold "$cur_name" "$cur_min_substance" "$cur_question"
+                    ;;
+                llm_substance_check)
+                    _judge_llm_substance_check "$cur_name" "$cur_question"
                     ;;
                 *)
                     warn "Unknown special check: $cur_special"
@@ -1321,29 +1389,108 @@ architecture_compliance_agent() {
         project_forbidden=$(_read_md_section "Forbidden paths" "$default_rules")
     fi
 
-    # --- Step 5: Build output ---
+    # --- Step 5: Build output (LLM-enhanced or rule-based fallback) ---
+    local questions_file="${2:-}"
     local temp_arch=$(mktemp)
-    {
-        echo "## Architecture alignment"
-        echo "- Detected stack: ${detected_stack}"
-        if [ -n "$repo_structure" ]; then
-            echo "- Repo structure: ${repo_structure}"
+    local _arch_used_llm=false
+
+    # Try LLM synthesis
+    local _arch_system_prompt=""
+    [ -f "$default_rules" ] && _arch_system_prompt=$(awk '/^## System prompt$/{f=1;next} /^## /{f=0} f' "$default_rules")
+
+    if [ -n "$_arch_system_prompt" ]; then
+        local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
+        local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+
+        # Load constraint rules from config
+        local default_constraints=""
+        [ -f "$default_rules" ] && default_constraints=$(_read_md_section "Constraints" "$default_rules")
+
+        local arch_prompt="${_arch_system_prompt}
+
+SPECIFICATION:
+Title: ${title}
+Context: ${context}
+Goal: ${goal}
+
+GHERKIN SCENARIOS:
+${gherkin_section}
+
+DETECTED FACTS (from automated repo scan):
+- Stack: ${detected_stack}
+- Repo structure: ${repo_structure:-not available}
+- Relevant paths found: ${relevant_dirs:-none found}
+- Forbidden paths: ${project_forbidden:-not set}
+${project_notes:+- Project notes: ${project_notes}}
+
+DEFAULT ARCHITECTURE CONSTRAINTS:
+${default_constraints}
+${project_constraints:+
+PROJECT-SPECIFIC CONSTRAINTS:
+${project_constraints}}
+
+OUTPUT FORMAT (use exactly these field markers, one per line):
+DETECTED_STACK: <confirmed stack, noting relevance to this feature>
+RELEVANT_MODULES: <which paths/modules are most relevant to this feature and why>
+CONSTRAINTS: <architecture constraints relevant to this specific feature>
+CONCERNS: <any architectural concerns or gaps, or None>
+QUESTION: <only if genuinely needed>"
+
+        local _arch_llm_result=0
+        local _arch_llm_response
+        _arch_llm_response=$(_agent_llm_or_fallback "architecture" "$arch_prompt" \
+            "DETECTED_STACK:|RELEVANT_MODULES:" \
+            "$questions_file") || _arch_llm_result=$?
+
+        if [ $_arch_llm_result -eq 0 ]; then
+            local _llm_stack=$(echo "$_arch_llm_response" | grep '^DETECTED_STACK:' | sed 's/^DETECTED_STACK:[[:space:]]*//')
+            local _llm_modules=$(echo "$_arch_llm_response" | grep '^RELEVANT_MODULES:' | sed 's/^RELEVANT_MODULES:[[:space:]]*//')
+            local _llm_constraints=$(echo "$_arch_llm_response" | grep '^CONSTRAINTS:' | sed 's/^CONSTRAINTS:[[:space:]]*//')
+            local _llm_concerns=$(echo "$_arch_llm_response" | grep '^CONCERNS:' | sed 's/^CONCERNS:[[:space:]]*//')
+
+            if [ -n "$_llm_stack" ] && [ -n "$_llm_modules" ]; then
+                {
+                    echo "## Architecture alignment"
+                    echo "- Detected stack: $_llm_stack"
+                    [ -n "$repo_structure" ] && echo "- Repo structure: ${repo_structure}"
+                    echo "- Relevant modules: $_llm_modules"
+                    [ -n "$_llm_constraints" ] && echo "- Constraints: $_llm_constraints"
+                    [ -n "$project_forbidden" ] && echo "- Forbidden paths: ${project_forbidden}"
+                    if [ -n "$_llm_concerns" ] && [ "$_llm_concerns" != "None" ]; then
+                        echo "- Architecture concerns: $_llm_concerns"
+                    fi
+                    if [ -n "$project_notes" ]; then
+                        echo ""
+                        echo "### Project notes"
+                        echo "$project_notes"
+                    fi
+                } > "$temp_arch"
+                _arch_used_llm=true
+            fi
+        elif [ $_arch_llm_result -eq 2 ]; then
+            rm -f "$temp_arch"
+            return 2  # NEEDS_INFO
         fi
-        if [ -n "$relevant_dirs" ]; then
-            echo "- Relevant paths for this feature: ${relevant_dirs}"
-        fi
-        if [ -n "$project_constraints" ]; then
-            echo "- Constraints: ${project_constraints}"
-        fi
-        if [ -n "$project_forbidden" ]; then
-            echo "- Forbidden paths: ${project_forbidden}"
-        fi
-        if [ -n "$project_notes" ]; then
-            echo ""
-            echo "### Project notes"
-            echo "$project_notes"
-        fi
-    } > "$temp_arch"
+    fi
+
+    # Fallback: rule-based concatenation
+    if [ "$_arch_used_llm" = false ]; then
+        info "Using rule-based architecture analysis..."
+        {
+            echo "## Architecture alignment"
+            echo "- Detected stack: ${detected_stack}"
+            [ -n "$repo_structure" ] && echo "- Repo structure: ${repo_structure}"
+            [ -n "$relevant_dirs" ] && echo "- Relevant paths for this feature: ${relevant_dirs}"
+            [ -n "$project_constraints" ] && echo "- Constraints: ${project_constraints}"
+            [ -n "$project_forbidden" ] && echo "- Forbidden paths: ${project_forbidden}"
+            if [ -n "$project_notes" ]; then
+                echo ""
+                echo "### Project notes"
+                echo "$project_notes"
+            fi
+        } > "$temp_arch"
+    fi
 
     awk '
         /^## Architecture alignment/ {
@@ -1358,7 +1505,9 @@ architecture_compliance_agent() {
     ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
 
     rm -f "$temp_arch"
-    if [ -n "$repo_config" ]; then
+    if [ "$_arch_used_llm" = true ]; then
+        success "Architecture section updated (LLM-powered)"
+    elif [ -n "$repo_config" ]; then
         success "Architecture section updated (repo inspected + project config)"
     elif [ -n "$repo_structure" ]; then
         success "Architecture section updated (repo inspected)"
@@ -1521,38 +1670,125 @@ lead_developer_agent() {
         project_notes=$(_read_ld_section "Notes" "$project_config")
     fi
 
-    # --- Step 5: Build output ---
+    # --- Step 5: Build output (LLM-enhanced or rule-based fallback) ---
+    local questions_file="${2:-}"
     local temp_cs=$(mktemp)
-    {
-        echo "## Code structure"
-        if [ -n "$module_pattern" ]; then
-            echo "- Module pattern: ${module_pattern}"
-        else
-            echo "- Module pattern: Not detected (no recognized language marker found)"
+    local _ld_used_llm=false
+
+    # Try LLM synthesis
+    local _ld_system_prompt=""
+    [ -f "$rules_file" ] && _ld_system_prompt=$(awk '/^## System prompt$/{f=1;next} /^## /{f=0} f' "$rules_file")
+
+    if [ -n "$_ld_system_prompt" ]; then
+        local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
+        local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local gherkin=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '1d;$d')
+
+        # Load error handling rules as additional domain knowledge
+        local error_handling_rules=""
+        [ -f "$rules_file" ] && error_handling_rules=$(awk '/^## Error handling$/,0' "$rules_file")
+
+        local ld_prompt="${_ld_system_prompt}
+
+SPECIFICATION:
+Title: ${title}
+Context: ${context}
+Goal: ${goal}
+
+GHERKIN SCENARIOS:
+${gherkin}
+
+DETECTED CODE STRUCTURE (from automated scan):
+- Detected stack: ${detected_stack}
+- Language marker: ${matched_marker:-none}
+- Module pattern: ${module_pattern:-not detected}
+- File naming: ${file_naming:-not detected}
+- Import rules: ${import_rules:-not detected}
+- Max file length: ${max_file_length:-not set}
+- Monolith warnings: ${monolith_warnings:-none}
+${project_notes:+- Project notes: ${project_notes}}
+
+DOMAIN RULES (your expertise):
+${error_handling_rules}
+
+OUTPUT FORMAT (use exactly these field markers, one per line):
+MODULE_PATTERN: <recommended module pattern with reasoning for this feature>
+FILE_CONVENTIONS: <naming convention with examples relevant to this feature>
+IMPORT_RULES: <import rules>
+SUGGESTED_FILES: <where new files should go for this feature, comma-separated paths>
+MAX_FILE_LENGTH: <threshold in lines>
+NOTES: <structural concerns or recommendations specific to this feature>
+QUESTION: <only if you genuinely cannot provide guidance>"
+
+        local _ld_llm_result=0
+        local _ld_llm_response
+        _ld_llm_response=$(_agent_llm_or_fallback "lead_developer" "$ld_prompt" \
+            "MODULE_PATTERN:|FILE_CONVENTIONS:" \
+            "$questions_file") || _ld_llm_result=$?
+
+        if [ $_ld_llm_result -eq 0 ]; then
+            local _llm_module=$(echo "$_ld_llm_response" | grep '^MODULE_PATTERN:' | sed 's/^MODULE_PATTERN:[[:space:]]*//')
+            local _llm_filenaming=$(echo "$_ld_llm_response" | grep '^FILE_CONVENTIONS:' | sed 's/^FILE_CONVENTIONS:[[:space:]]*//')
+            local _llm_imports=$(echo "$_ld_llm_response" | grep '^IMPORT_RULES:' | sed 's/^IMPORT_RULES:[[:space:]]*//')
+            local _llm_suggested=$(echo "$_ld_llm_response" | grep '^SUGGESTED_FILES:' | sed 's/^SUGGESTED_FILES:[[:space:]]*//')
+            local _llm_maxlen=$(echo "$_ld_llm_response" | grep '^MAX_FILE_LENGTH:' | sed 's/^MAX_FILE_LENGTH:[[:space:]]*//')
+            local _llm_notes=$(echo "$_ld_llm_response" | grep '^NOTES:' | sed 's/^NOTES:[[:space:]]*//')
+
+            if [ -n "$_llm_module" ] && [ -n "$_llm_filenaming" ]; then
+                {
+                    echo "## Code structure"
+                    echo "- Module pattern: $_llm_module"
+                    echo "- File conventions: $_llm_filenaming"
+                    [ -n "$_llm_imports" ] && echo "- Import rules: $_llm_imports"
+                    [ -n "$_llm_maxlen" ] && echo "- Max file length: $_llm_maxlen"
+                    [ -n "$_llm_suggested" ] && echo "- Suggested file locations: $_llm_suggested"
+                    [ -n "$monolith_warnings" ] && echo "- Monolith warnings: ${monolith_warnings} (exceeds ${monolith_threshold}-line threshold)"
+                    echo "- Notes: ${_llm_notes:-}"
+                    echo ""
+                } > "$temp_cs"
+                _ld_used_llm=true
+            fi
+        elif [ $_ld_llm_result -eq 2 ]; then
+            rm -f "$temp_cs"
+            return 2  # NEEDS_INFO
         fi
-        if [ -n "$file_naming" ]; then
-            echo "- File conventions: ${file_naming}"
-        else
-            echo "- File conventions:"
-        fi
-        if [ -n "$import_rules" ]; then
-            echo "- Import rules: ${import_rules}"
-        else
-            echo "- Import rules:"
-        fi
-        if [ -n "$max_file_length" ]; then
-            echo "- Max file length: ${max_file_length} lines"
-        fi
-        if [ -n "$monolith_warnings" ]; then
-            echo "- Monolith warnings: ${monolith_warnings} (exceeds ${monolith_threshold}-line threshold)"
-        fi
-        if [ -n "$project_notes" ]; then
-            echo "- Notes: ${project_notes}"
-        else
-            echo "- Notes:"
-        fi
-        echo ""
-    } > "$temp_cs"
+    fi
+
+    # Fallback: rule-based concatenation
+    if [ "$_ld_used_llm" = false ]; then
+        info "Using rule-based code structure analysis..."
+        {
+            echo "## Code structure"
+            if [ -n "$module_pattern" ]; then
+                echo "- Module pattern: ${module_pattern}"
+            else
+                echo "- Module pattern: Not detected (no recognized language marker found)"
+            fi
+            if [ -n "$file_naming" ]; then
+                echo "- File conventions: ${file_naming}"
+            else
+                echo "- File conventions:"
+            fi
+            if [ -n "$import_rules" ]; then
+                echo "- Import rules: ${import_rules}"
+            else
+                echo "- Import rules:"
+            fi
+            if [ -n "$max_file_length" ]; then
+                echo "- Max file length: ${max_file_length} lines"
+            fi
+            if [ -n "$monolith_warnings" ]; then
+                echo "- Monolith warnings: ${monolith_warnings} (exceeds ${monolith_threshold}-line threshold)"
+            fi
+            if [ -n "$project_notes" ]; then
+                echo "- Notes: ${project_notes}"
+            else
+                echo "- Notes:"
+            fi
+            echo ""
+        } > "$temp_cs"
+    fi
 
     # Check if ## Code structure section exists in spec
     if grep -q "^## Code structure" "$spec_file"; then
@@ -1582,7 +1818,9 @@ lead_developer_agent() {
     if [ -n "$monolith_warnings" ]; then
         warn "Monolith detected: ${monolith_warnings}"
     fi
-    if [ -n "$project_config" ]; then
+    if [ "$_ld_used_llm" = true ]; then
+        success "Code structure section updated (LLM-powered)"
+    elif [ -n "$project_config" ]; then
         success "Code structure section updated (repo inspected + project config)"
     elif [ -n "$module_pattern" ]; then
         success "Code structure section updated (repo inspected)"
@@ -1607,8 +1845,42 @@ security_compliance_agent() {
     # Check if security section already has substantive content
     local existing_sec=$(sed -n '/^## Security and compliance/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$existing_sec" | grep -q -e "- Data classification:[[:space:]]*[^[:space:]]"; then
-        success "Security and compliance section already filled in - preserving"
-        return 0
+        # Check if existing values are boilerplate defaults that contradict the spec
+        local _is_boilerplate=false
+        if [ -f "$rules_file" ]; then
+            local spec_lower=$(tr '[:upper:]' '[:lower:]' < "$spec_file")
+            local _bp_in_section=false
+            while IFS= read -r _bp_line; do
+                case "$_bp_line" in
+                    "## Boilerplate defaults"*) _bp_in_section=true; continue ;;
+                    "## "*) [ "$_bp_in_section" = true ] && break; continue ;;
+                    "#"*|"") continue ;;
+                esac
+                [ "$_bp_in_section" = true ] || continue
+                local _bp_value=$(echo "$_bp_line" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                local _bp_keywords=$(echo "$_bp_line" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                # Check if existing section contains this boilerplate value
+                if echo "$existing_sec" | grep -qi "$_bp_value"; then
+                    # Check if spec contains any contradicting keyword
+                    local _kw
+                    while IFS=',' read -ra _kw_arr; do
+                        for _kw in "${_kw_arr[@]}"; do
+                            _kw=$(echo "$_kw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                            if echo "$spec_lower" | grep -qi "$_kw"; then
+                                _is_boilerplate=true
+                                break 2
+                            fi
+                        done
+                    done <<< "$_bp_keywords"
+                fi
+                [ "$_is_boilerplate" = true ] && break
+            done < "$rules_file"
+        fi
+        if [ "$_is_boilerplate" = false ]; then
+            success "Security and compliance section already filled in - preserving"
+            return 0
+        fi
+        info "Existing security values are boilerplate defaults contradicted by spec — re-evaluating"
     fi
 
     local gherkin_section=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
@@ -1619,6 +1891,99 @@ security_compliance_agent() {
 
     info "Analyzing scenarios for security implications..."
     local scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then")
+    local questions_file="${2:-}"
+
+    # --- LLM path: reason about security using rules as expertise ---
+    local _sec_system_prompt=""
+    [ -f "$rules_file" ] && _sec_system_prompt=$(awk '/^## System prompt$/{f=1;next} /^## /{f=0} f' "$rules_file")
+
+    if [ -n "$_sec_system_prompt" ]; then
+        local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
+        local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+        local requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
+        local arch_section=$(sed -n '/^## Architecture alignment$/,/^## /p' "$spec_file" | sed '1d;$d')
+
+        # Load domain rules (everything from Data classification rules onward)
+        local domain_rules=""
+        [ -f "$rules_file" ] && domain_rules=$(awk '/^## Data classification rules$/,0' "$rules_file")
+
+        local sec_prompt="${_sec_system_prompt}
+
+SPECIFICATION:
+Title: ${title}
+Context: ${context}
+Goal: ${goal}
+Requirements: ${requirements}
+
+GHERKIN SCENARIOS:
+${gherkin_section}
+
+ARCHITECTURE CONTEXT:
+${arch_section}
+
+DOMAIN RULES (your expertise — use these to guide your analysis, not as a mechanical lookup):
+${domain_rules}
+
+OUTPUT FORMAT (use exactly these field markers, one per line, with your assessment after the colon):
+DATA_CLASSIFICATION: <level (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED) — brief reasoning>
+PII_SECRETS: <assessment of PII and secrets handling>
+AUTHN_AUTHZ: <authentication and authorization requirements>
+LOGGING_AUDIT: <logging and audit requirements>
+SECURITY_CONSTRAINTS: <semicolon-separated list of specific security constraints>
+OWASP_RELEVANT: <applicable OWASP IDs with brief mitigation, or None identified>
+QUESTION: <only if you genuinely cannot determine a field — one QUESTION: per line>"
+
+        local _sec_llm_result=0
+        local _sec_llm_response
+        _sec_llm_response=$(_agent_llm_or_fallback "security" "$sec_prompt" \
+            "DATA_CLASSIFICATION:|AUTHN_AUTHZ:|SECURITY_CONSTRAINTS:" \
+            "$questions_file") || _sec_llm_result=$?
+
+        if [ $_sec_llm_result -eq 0 ]; then
+            # Parse LLM response
+            local data_classification=$(echo "$_sec_llm_response" | grep '^DATA_CLASSIFICATION:' | sed 's/^DATA_CLASSIFICATION:[[:space:]]*//')
+            local pii_secrets=$(echo "$_sec_llm_response" | grep '^PII_SECRETS:' | sed 's/^PII_SECRETS:[[:space:]]*//')
+            local authn_authz=$(echo "$_sec_llm_response" | grep '^AUTHN_AUTHZ:' | sed 's/^AUTHN_AUTHZ:[[:space:]]*//')
+            local logging_audit=$(echo "$_sec_llm_response" | grep '^LOGGING_AUDIT:' | sed 's/^LOGGING_AUDIT:[[:space:]]*//')
+            local security_constraints=$(echo "$_sec_llm_response" | grep '^SECURITY_CONSTRAINTS:' | sed 's/^SECURITY_CONSTRAINTS:[[:space:]]*//')
+            local owasp_relevant=$(echo "$_sec_llm_response" | grep '^OWASP_RELEVANT:' | sed 's/^OWASP_RELEVANT:[[:space:]]*//')
+
+            # Validate parsed fields are non-empty
+            if [ -n "$data_classification" ] && [ -n "$authn_authz" ] && [ -n "$security_constraints" ]; then
+                local temp_section=$(mktemp)
+                cat > "$temp_section" <<EOF
+- Data classification: $data_classification
+- AuthN/AuthZ: $authn_authz
+- Logging/Audit: ${logging_audit:-Standard application logging}
+- PII/Secrets: ${pii_secrets:-No PII or secrets identified}
+- Security constraints: $security_constraints
+${owasp_relevant:+- OWASP considerations: $owasp_relevant}
+EOF
+                awk '
+                    /^## Security and compliance/ {
+                        print
+                        print ""
+                        system("cat '"$temp_section"'")
+                        in_section = 1
+                        next
+                    }
+                    /^## / && in_section { in_section = 0 }
+                    !in_section { print }
+                ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
+                rm -f "$temp_section"
+                success "Security and compliance section updated (LLM-powered)"
+                return 0
+            fi
+            warn "security: LLM response had empty required fields — falling back to rule-based"
+        elif [ $_sec_llm_result -eq 2 ]; then
+            return 2  # NEEDS_INFO — questions written
+        fi
+        # Fall through to rule-based on LLM failure
+    fi
+
+    # --- Fallback: rule-based keyword matching ---
+    info "Using rule-based security analysis..."
 
     # Helper: first-match keyword rule from a section in the rules file
     _match_rule() {
@@ -1719,7 +2084,7 @@ EOF
     ' "$spec_file" > "$spec_file.tmp" && mv "$spec_file.tmp" "$spec_file"
 
     rm -f "$temp_section"
-    success "Security and compliance section updated"
+    success "Security and compliance section updated (rule-based fallback)"
     return 0
 }
 
@@ -1808,6 +2173,80 @@ print(data.get('response', ''))
     return 0
 }
 
+# Shared LLM-with-fallback dispatcher for agent functions.
+# Calls ollama_generate, validates output markers, handles QUESTION: protocol.
+# Args:
+#   $1 = agent_name        (for logging)
+#   $2 = prompt            (fully assembled prompt string)
+#   $3 = required_markers  (pipe-separated output markers to validate, e.g. "FIELD_A:|FIELD_B:")
+#   $4 = questions_file    (path to questions.md, or "" to skip question handling)
+# Returns:
+#   stdout = LLM response text (only on success)
+#   exit 0 = LLM response valid
+#   exit 1 = LLM unavailable or produced garbage (caller should run fallback)
+#   exit 2 = LLM returned only QUESTION: lines (questions written to questions_file)
+_agent_llm_or_fallback() {
+    local agent_name="$1"
+    local prompt="$2"
+    local required_markers="$3"
+    local questions_file="$4"
+
+    # 1. Call ollama_generate
+    local llm_response
+    llm_response=$(ollama_generate "$prompt" 2>/dev/null) || {
+        warn "${agent_name}: Ollama unavailable — falling back to rule-based"
+        return 1
+    }
+
+    if [ -z "$llm_response" ]; then
+        warn "${agent_name}: Empty LLM response — falling back to rule-based"
+        return 1
+    fi
+
+    # 2. Strip markdown fences if present
+    llm_response=$(echo "$llm_response" | sed '/^```/d')
+
+    # 3. Validate required output markers are present
+    if [ -n "$required_markers" ]; then
+        local _saved_ifs="$IFS"
+        IFS='|'
+        local _all_found=true
+        for _marker in $required_markers; do
+            if ! echo "$llm_response" | grep -q "$_marker"; then
+                _all_found=false
+                break
+            fi
+        done
+        IFS="$_saved_ifs"
+        if [ "$_all_found" = false ]; then
+            warn "${agent_name}: LLM response missing required markers — falling back to rule-based"
+            return 1
+        fi
+    fi
+
+    # 4. Extract and handle QUESTION: lines
+    local _question_lines
+    _question_lines=$(echo "$llm_response" | grep '^QUESTION:' || true)
+    if [ -n "$_question_lines" ] && [ -n "$questions_file" ] && [ -f "$questions_file" ]; then
+        while IFS= read -r _qline; do
+            local _qtext="${_qline#QUESTION: }"
+            _judge_add_question "$questions_file" "$_qtext"
+        done <<< "$_question_lines"
+        # Strip QUESTION: lines from the response
+        llm_response=$(echo "$llm_response" | grep -v '^QUESTION:')
+    fi
+
+    # 5. Check if ONLY questions were returned (no real output)
+    local _non_question_substance
+    _non_question_substance=$(echo "$llm_response" | grep -v '^[[:space:]]*$' | grep -c '[[:alnum:]]' 2>/dev/null) || _non_question_substance=0
+    if [ "$_non_question_substance" -eq 0 ] && [ -n "$_question_lines" ]; then
+        return 2  # NEEDS_INFO — only questions, no output
+    fi
+
+    echo "$llm_response"
+    return 0
+}
+
 # Spec Enrichment Agent - Expands thin spec fields using LLM, falls back to blocking questions
 # Returns: 0 = enriched or already rich, 1 = error, 2 = needs human info (questions written)
 spec_enrichment_agent() {
@@ -1859,8 +2298,15 @@ spec_enrichment_agent() {
         [ -n "$_thresh" ] && substance_threshold="$_thresh"
     fi
 
+    # Read min user substance threshold (very thin gate)
+    local min_user_substance=2
+    if [ -f "$rules_file" ]; then
+        local _mus=$(awk '/^## Minimum user substance$/{f=1;next} /^## /{f=0} f && !/^#/ && !/^$/' "$rules_file" | head -1)
+        [ -n "$_mus" ] && min_user_substance="$_mus"
+    fi
+
     if [ "$_enrich_substance" -lt "$substance_threshold" ]; then
-        info "Thin spec detected ($_enrich_substance substantive lines, need 4+)"
+        info "Thin spec detected ($_enrich_substance substantive lines, need $substance_threshold+)"
         _needs_enrichment=true
     fi
     if [ "$_enrich_dup" -ge 2 ]; then
@@ -1871,6 +2317,13 @@ spec_enrichment_agent() {
     if [ "$_needs_enrichment" = false ]; then
         success "Spec fields already have sufficient distinct content"
         return 0
+    fi
+
+    # Very thin gate: too little real user input for LLM to expand safely
+    if [ "$_enrich_substance" -lt "$min_user_substance" ] || [ "$_enrich_dup" -ge 2 ]; then
+        warn "Very thin spec ($_enrich_substance lines, $_enrich_dup duplicates) — LLM cannot safely expand, generating questions"
+        _write_enrichment_questions "$title" "$context" "$questions_file"
+        return 2
     fi
 
     # --- Try LLM expansion ---
@@ -2707,89 +3160,159 @@ test_strategy_agent() {
         done
     fi
 
-    # --- Step 2: Determine test layers from Gherkin keywords ---
+    # --- Step 2+5+6: LLM-powered test strategy or rule-based fallback ---
+    local questions_file="${2:-}"
     local layers_unit=""
     local layers_integration=""
     local layers_e2e=""
     local layer_details_unit=""
     local layer_details_integration=""
     local layer_details_e2e=""
+    local _ts_used_llm=false
+    local _ts_llm_layers=""
+    local _ts_llm_mapping=""
+    local _ts_llm_gates=""
 
-    if [ -f "$rules_file" ]; then
-        local in_layers=false
-        while IFS= read -r line; do
-            case "$line" in
-                "## Test layers"*) in_layers=true; continue ;;
-                "## "*) [ "$in_layers" = true ] && break; continue ;;
-                "#"*|"") continue ;;
-            esac
-            if [ "$in_layers" = true ] && [[ "$line" == -\ * ]]; then
-                # Parse: keywords: layer | framework | description
-                local keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
-                local rest=$(echo "$line" | cut -d: -f2-)
-                local layer=$(echo "$rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                local framework=$(echo "$rest" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                local description=$(echo "$rest" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Try LLM-powered test strategy (layers + scenario mapping in one call)
+    local _ts_system_prompt=""
+    [ -f "$rules_file" ] && _ts_system_prompt=$(awk '/^## System prompt$/{f=1;next} /^## /{f=0} f' "$rules_file")
 
-                # Check if any keyword matches the Gherkin content
-                local IFS_SAVE="$IFS"
-                IFS=','
-                for kw in $keywords; do
-                    if echo "$gherkin" | grep -qi "$kw"; then
-                        case "$layer" in
-                            unit)
-                                if [ -z "$layers_unit" ]; then
-                                    layers_unit="$framework"
-                                    layer_details_unit="$description"
-                                elif ! echo "$layer_details_unit" | grep -q "$description"; then
-                                    layer_details_unit="$layer_details_unit, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}')"
-                                fi
-                                ;;
-                            integration)
-                                if [ -z "$layers_integration" ]; then
-                                    layers_integration="$framework"
-                                    layer_details_integration="$description"
-                                elif ! echo "$layer_details_integration" | grep -q "$description"; then
-                                    layer_details_integration="$layer_details_integration, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}')"
-                                fi
-                                ;;
-                            e2e)
-                                if [ "$_has_frontend" = false ]; then
-                                    # Downgrade: no frontend in repo, e2e makes no sense
-                                    if [ -z "$layers_integration" ]; then
-                                        layers_integration="${framework}"
-                                        layer_details_integration="${description} (downgraded from e2e — no frontend detected)"
-                                    elif ! echo "$layer_details_integration" | grep -q "$description"; then
-                                        layer_details_integration="$layer_details_integration, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}') (downgraded from e2e)"
-                                    fi
-                                else
-                                    if [ -z "$layers_e2e" ]; then
-                                        layers_e2e="$framework"
-                                        layer_details_e2e="$description"
-                                    elif ! echo "$layer_details_e2e" | grep -q "$description"; then
-                                        layer_details_e2e="$layer_details_e2e, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}')"
-                                    fi
-                                fi
-                                ;;
-                        esac
-                        break  # One keyword match per rule is enough
-                    fi
-                done
-                IFS="$IFS_SAVE"
+    if [ -n "$_ts_system_prompt" ] && [ "$scenario_count" -gt 0 ] 2>/dev/null; then
+        local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
+
+        # Load test layer rules and quality gates as domain knowledge
+        local ts_domain_rules=""
+        [ -f "$rules_file" ] && ts_domain_rules=$(awk '/^## Test layers$/,/^## Framework mapping/' "$rules_file")
+
+        local ts_quality_rules=""
+        [ -f "$rules_file" ] && ts_quality_rules=$(awk '/^## Quality gates$/,/^## /' "$rules_file")
+
+        local frontend_note="Frontend detected: ${_has_frontend}"
+        [ "$_has_frontend" = false ] && frontend_note="Frontend detected: NO — do NOT assign e2e tests, downgrade to integration"
+
+        local ts_prompt="${_ts_system_prompt}
+
+SPECIFICATION:
+Title: ${title}
+
+GHERKIN SCENARIOS:
+${gherkin}
+
+ENVIRONMENT:
+- Language marker: ${detected_marker:-unknown}
+- ${frontend_note}
+- Golden build: ${build_cmd}
+- Golden test: ${test_cmd}
+
+TEST LAYER RULES (your expertise):
+${ts_domain_rules}
+
+QUALITY GATE RULES:
+${ts_quality_rules}
+
+OUTPUT FORMAT:
+TEST_LAYERS:
+- Unit tests: <framework> -- <description>
+- Integration tests: <framework> -- <description>
+- E2E tests: <framework> -- <description>
+(omit any layer that doesn't apply; NEVER include E2E if no frontend)
+
+SCENARIO_MAPPING:
+| Scenario | Layer | Framework | Suggested location |
+(one row per Gherkin scenario)
+
+QUALITY_GATES:
+- <gate 1>
+- <gate 2>
+(specific to this feature's tech stack)
+
+QUESTION: <only if a scenario is genuinely ambiguous>"
+
+        local _ts_llm_result=0
+        local _ts_llm_response
+        _ts_llm_response=$(_agent_llm_or_fallback "test_strategy" "$ts_prompt" \
+            "TEST_LAYERS:|SCENARIO_MAPPING:" \
+            "$questions_file") || _ts_llm_result=$?
+
+        if [ $_ts_llm_result -eq 0 ]; then
+            # Parse LLM response into sections
+            _ts_llm_layers=$(echo "$_ts_llm_response" | sed -n '/^TEST_LAYERS:/,/^[A-Z_]*:/p' | grep '^- ' || true)
+            _ts_llm_mapping=$(echo "$_ts_llm_response" | sed -n '/^SCENARIO_MAPPING:/,/^[A-Z_]*:/p' | grep '^|' | \
+                grep -vi '| *Scenario *|' | grep -v '^| *-' || true)
+            _ts_llm_gates=$(echo "$_ts_llm_response" | sed -n '/^QUALITY_GATES:/,/^[A-Z_]*:/p' | grep '^- ' || true)
+
+            if [ -n "$_ts_llm_layers" ]; then
+                _ts_used_llm=true
             fi
-        done < "$rules_file"
+        elif [ $_ts_llm_result -eq 2 ]; then
+            return 2  # NEEDS_INFO
+        fi
     fi
 
-    # Apply default test layer if nothing matched
-    if [ -z "$layers_unit" ] && [ -z "$layers_integration" ] && [ -z "$layers_e2e" ]; then
+    # Fallback: rule-based keyword matching for test layers
+    if [ "$_ts_used_llm" = false ]; then
+        info "Using rule-based test layer detection..."
         if [ -f "$rules_file" ]; then
-            local default_line=$(sed -n '/^## Default test layer$/,/^## /p' "$rules_file" | grep -v '^##' | grep -v '^$' | head -1)
-            if [ -n "$default_line" ]; then
-                layers_unit=$(echo "$default_line" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                layer_details_unit=$(echo "$default_line" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            fi
+            local in_layers=false
+            while IFS= read -r line; do
+                case "$line" in
+                    "## Test layers"*) in_layers=true; continue ;;
+                    "## "*) [ "$in_layers" = true ] && break; continue ;;
+                    "#"*|"") continue ;;
+                esac
+                if [ "$in_layers" = true ] && [[ "$line" == -\ * ]]; then
+                    local keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    local rest=$(echo "$line" | cut -d: -f2-)
+                    local layer=$(echo "$rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    local framework=$(echo "$rest" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    local description=$(echo "$rest" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    local IFS_SAVE="$IFS"
+                    IFS=','
+                    for kw in $keywords; do
+                        if echo "$gherkin" | grep -qi "$kw"; then
+                            case "$layer" in
+                                unit)
+                                    if [ -z "$layers_unit" ]; then
+                                        layers_unit="$framework"; layer_details_unit="$description"
+                                    elif ! echo "$layer_details_unit" | grep -q "$description"; then
+                                        layer_details_unit="$layer_details_unit, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}')"
+                                    fi ;;
+                                integration)
+                                    if [ -z "$layers_integration" ]; then
+                                        layers_integration="$framework"; layer_details_integration="$description"
+                                    elif ! echo "$layer_details_integration" | grep -q "$description"; then
+                                        layer_details_integration="$layer_details_integration, $(echo "$description" | awk '{print tolower(substr($0,1,1)) substr($0,2)}')"
+                                    fi ;;
+                                e2e)
+                                    if [ "$_has_frontend" = false ]; then
+                                        if [ -z "$layers_integration" ]; then
+                                            layers_integration="${framework}"; layer_details_integration="${description} (downgraded from e2e — no frontend detected)"
+                                        fi
+                                    else
+                                        if [ -z "$layers_e2e" ]; then
+                                            layers_e2e="$framework"; layer_details_e2e="$description"
+                                        fi
+                                    fi ;;
+                            esac
+                            break
+                        fi
+                    done
+                    IFS="$IFS_SAVE"
+                fi
+            done < "$rules_file"
         fi
-        [ -z "$layers_unit" ] && layers_unit="pytest/jest" && layer_details_unit="Test business logic functions in isolation"
+
+        # Apply default test layer if nothing matched
+        if [ -z "$layers_unit" ] && [ -z "$layers_integration" ] && [ -z "$layers_e2e" ]; then
+            if [ -f "$rules_file" ]; then
+                local default_line=$(sed -n '/^## Default test layer$/,/^## /p' "$rules_file" | grep -v '^##' | grep -v '^$' | head -1)
+                if [ -n "$default_line" ]; then
+                    layers_unit=$(echo "$default_line" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    layer_details_unit=$(echo "$default_line" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                fi
+            fi
+            [ -z "$layers_unit" ] && layers_unit="pytest/jest" && layer_details_unit="Test business logic functions in isolation"
+        fi
     fi
 
     # --- Step 3: Resolve frameworks per detected language ---
@@ -2840,84 +3363,51 @@ test_strategy_agent() {
         quality_gates="- All tests pass (zero failures)\n- No hardcoded secrets or credentials in test code\n"
     fi
 
-    # --- Step 5: Build rule-based output ---
+    # --- Step 5+6: Build output (LLM or fallback) ---
     local test_layers_section=""
-    [ -n "$layers_unit" ] && test_layers_section="${test_layers_section}- Unit tests: ${layers_unit} — ${layer_details_unit}\n"
-    [ -n "$layers_integration" ] && test_layers_section="${test_layers_section}- Integration tests: ${layers_integration} — ${layer_details_integration}\n"
-    [ -n "$layers_e2e" ] && test_layers_section="${test_layers_section}- E2E tests: ${layers_e2e} — ${layer_details_e2e}\n"
-
-    # Build scenario list for LLM prompt / fallback table
-    local scenario_names=""
     local scenario_table=""
-    if [ "$scenario_count" -gt 0 ] 2>/dev/null; then
-        scenario_names=$(echo "$gherkin" | grep "Scenario:" | sed 's/.*Scenario:[[:space:]]*//')
-    fi
 
-    # --- Step 6: LLM enhancement (optional) ---
-    local llm_scenario_mapping=""
-    if [ "$scenario_count" -gt 0 ] 2>/dev/null && [ -n "$scenario_names" ]; then
-        local frontend_note=""
-        if [ "$_has_frontend" = false ]; then
-            frontend_note="
-PROJECT NOTE: This project has NO frontend (no React/Vue/Angular/Svelte detected, no frontend/ directory).
-Do NOT assign e2e layer. Downgrade UI-related scenarios to integration or unit.
-"
+    if [ "$_ts_used_llm" = true ]; then
+        # Use LLM output for layers, scenario mapping, and quality gates
+        test_layers_section="$_ts_llm_layers"
+
+        if [ -n "$_ts_llm_mapping" ]; then
+            scenario_table="| Scenario | Layer | Framework | Suggested location |\n|----------|-------|-----------|-------------------|\n${_ts_llm_mapping}"
         fi
 
-        local prompt="You are a test strategy advisor. Given these Gherkin scenarios and the detected test layers, map each scenario to a specific test layer, framework, and suggested file location.
-
-GHERKIN SCENARIOS:
-${gherkin}
-
-DETECTED TEST LAYERS:
-$(echo -e "$test_layers_section")
-
-REPO LANGUAGE MARKER: ${detected_marker:-unknown}
-${frontend_note}
-INSTRUCTIONS:
-For each Scenario, output EXACTLY one line in this markdown table format:
-| Scenario name | layer | framework | suggested file path |
-
-Rules:
-- layer must be one of: unit, integration, e2e
-- framework should match the detected frameworks above
-- file path should follow standard conventions (tests/ or e2e/ directory)
-- Output ONLY the table rows, no header, no fences, no explanation
-- One line per scenario, starting with |"
-
-        local llm_response
-        llm_response=$(ollama_generate "$prompt" 2>/dev/null) || true
-
-        if [ -n "$llm_response" ]; then
-            # Extract only data rows (skip header/separator rows the LLM echoes back)
-            llm_scenario_mapping=$(echo "$llm_response" | grep '^|' | \
-                grep -vi '| *Scenario name\b\|| *Scenario *|\|| *layer *|\|^| *-' | \
-                awk -F'|' '!seen[$2]++' | head -20)
+        if [ -n "$_ts_llm_gates" ]; then
+            quality_gates=$(echo "$_ts_llm_gates" | sed 's/^//')
+            quality_gates="${quality_gates}\n"
         fi
-    fi
+    else
+        # Fallback: rule-based layer and scenario output
+        [ -n "$layers_unit" ] && test_layers_section="${test_layers_section}- Unit tests: ${layers_unit} — ${layer_details_unit}\n"
+        [ -n "$layers_integration" ] && test_layers_section="${test_layers_section}- Integration tests: ${layers_integration} — ${layer_details_integration}\n"
+        [ -n "$layers_e2e" ] && test_layers_section="${test_layers_section}- E2E tests: ${layers_e2e} — ${layer_details_e2e}\n"
 
-    # Build scenario mapping (LLM or fallback)
-    if [ -n "$llm_scenario_mapping" ]; then
-        scenario_table="| Scenario | Layer | Framework | Suggested location |\n|----------|-------|-----------|-------------------|\n${llm_scenario_mapping}"
-    elif [ "$scenario_count" -gt 0 ] 2>/dev/null && [ -n "$scenario_names" ]; then
-        # Fallback: simple mapping based on detected layers
-        scenario_table="| Scenario | Layer | Framework | Suggested location |\n|----------|-------|-----------|-------------------|\n"
-        while IFS= read -r scenario_name; do
-            [ -z "$scenario_name" ] && continue
-            # Guess layer from scenario name keywords
-            local s_layer="unit" s_fw="${layers_unit:-pytest/jest}" s_loc="tests/"
-            if echo "$scenario_name" | grep -qiE "UI|page|form|button|dashboard|click|display|render"; then
-                if [ "$_has_frontend" = true ]; then
-                    s_layer="e2e"; s_fw="${layers_e2e:-Playwright}"; s_loc="e2e/"
-                else
+        # Fallback scenario mapping
+        local scenario_names=""
+        if [ "$scenario_count" -gt 0 ] 2>/dev/null; then
+            scenario_names=$(echo "$gherkin" | grep "Scenario:" | sed 's/.*Scenario:[[:space:]]*//')
+        fi
+        if [ "$scenario_count" -gt 0 ] 2>/dev/null && [ -n "$scenario_names" ]; then
+            scenario_table="| Scenario | Layer | Framework | Suggested location |\n|----------|-------|-----------|-------------------|\n"
+            while IFS= read -r scenario_name; do
+                [ -z "$scenario_name" ] && continue
+                local s_layer="unit" s_fw="${layers_unit:-pytest/jest}" s_loc="tests/"
+                if echo "$scenario_name" | grep -qiE "UI|page|form|button|dashboard|click|display|render"; then
+                    if [ "$_has_frontend" = true ]; then
+                        s_layer="e2e"; s_fw="${layers_e2e:-Playwright}"; s_loc="e2e/"
+                    else
+                        s_layer="integration"; s_fw="${layers_integration:-httpx/supertest}"; s_loc="tests/integration/"
+                    fi
+                elif echo "$scenario_name" | grep -qiE "api|endpoint|route|login|auth|database|query|email|webhook|file|upload|download"; then
                     s_layer="integration"; s_fw="${layers_integration:-httpx/supertest}"; s_loc="tests/integration/"
                 fi
-            elif echo "$scenario_name" | grep -qiE "api|endpoint|route|login|auth|database|query|email|webhook|file|upload|download"; then
-                s_layer="integration"; s_fw="${layers_integration:-httpx/supertest}"; s_loc="tests/integration/"
-            fi
-            local safe_name=$(echo "$scenario_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
-            scenario_table="${scenario_table}| ${scenario_name} | ${s_layer} | ${s_fw} | ${s_loc}${safe_name}.test | \n"
-        done <<< "$scenario_names"
+                local safe_name=$(echo "$scenario_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
+                scenario_table="${scenario_table}| ${scenario_name} | ${s_layer} | ${s_fw} | ${s_loc}${safe_name}.test | \n"
+            done <<< "$scenario_names"
+        fi
     fi
 
     # --- Step 7: Assemble and write to spec ---
@@ -2951,10 +3441,10 @@ Rules:
 
     rm -f "$temp_test"
 
-    if [ -n "$llm_scenario_mapping" ]; then
-        success "Test strategy generated (rule-based + LLM scenario mapping)"
+    if [ "$_ts_used_llm" = true ]; then
+        success "Test strategy generated (LLM-powered)"
     else
-        success "Test strategy generated (rule-based)"
+        success "Test strategy generated (rule-based fallback)"
     fi
     return 0
 }
@@ -3108,6 +3598,10 @@ QUES_EOF
     fi
     echo ""
 
+    # When enrichment returns NEEDS_INFO, skip downstream agents — no point
+    # filling sections based on a thin spec. Jump straight to judge.
+    if [ $enrich_result -ne 2 ]; then
+
     # Run BA Translator Agent (LLM-powered Gherkin generation)
     info "Running BA Translator Agent..."
     if ba_translator_agent "$temp_dir"; then
@@ -3119,8 +3613,12 @@ QUES_EOF
 
     # Run Architecture Compliance Agent
     info "Running Architecture Compliance Agent..."
-    if architecture_compliance_agent "$temp_dir"; then
+    local arch_result=0
+    architecture_compliance_agent "$temp_dir" "$questions_file" || arch_result=$?
+    if [ $arch_result -eq 0 ]; then
         success "Architecture Compliance Agent completed"
+    elif [ $arch_result -eq 2 ]; then
+        warn "Architecture agent generated questions (continuing to Judge)"
     else
         warn "Architecture Compliance Agent reported issues (continuing to Judge)"
     fi
@@ -3128,8 +3626,12 @@ QUES_EOF
 
     # Run Lead Developer Agent (code structure guidance)
     info "Running Lead Developer Agent..."
-    if lead_developer_agent "$temp_dir"; then
+    local ld_result=0
+    lead_developer_agent "$temp_dir" "$questions_file" || ld_result=$?
+    if [ $ld_result -eq 0 ]; then
         success "Lead Developer Agent completed"
+    elif [ $ld_result -eq 2 ]; then
+        warn "Lead Developer agent generated questions (continuing to Judge)"
     else
         warn "Lead Developer Agent reported issues (continuing to Judge)"
     fi
@@ -3137,15 +3639,23 @@ QUES_EOF
 
     # Run Security & Compliance Agent
     info "Running Security & Compliance Agent..."
-    if security_compliance_agent "$temp_dir"; then
+    local sec_result=0
+    security_compliance_agent "$temp_dir" "$questions_file" || sec_result=$?
+    if [ $sec_result -eq 0 ]; then
         success "Security & Compliance Agent completed"
+    elif [ $sec_result -eq 2 ]; then
+        warn "Security agent generated questions (continuing to Judge)"
     else
         warn "Security & Compliance Agent reported issues (continuing to Judge)"
     fi
     echo ""
 
-    # Run Test Strategy Agent (rule-based + LLM enhancement)
-    test_strategy_agent "$temp_dir"
+    # Run Test Strategy Agent (LLM-powered + rule-based fallback)
+    local ts_result=0
+    test_strategy_agent "$temp_dir" "$questions_file" || ts_result=$?
+    if [ $ts_result -eq 2 ]; then
+        warn "Test Strategy agent generated questions (continuing to Judge)"
+    fi
     echo ""
 
     # Run Engineering Principles Agent
@@ -3156,6 +3666,11 @@ QUES_EOF
         warn "Engineering Principles Agent reported issues (continuing to Judge)"
     fi
     echo ""
+
+    else
+        warn "Skipping downstream agents (spec too thin for meaningful analysis)"
+        echo ""
+    fi  # end enrich_result != 2
 
     # Read updated spec back
     local updated_spec=$(cat "$spec_file")

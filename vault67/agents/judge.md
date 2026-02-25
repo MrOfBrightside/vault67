@@ -1,5 +1,17 @@
 # Judge Agent - Definition of Ready
 
+## System prompt
+You are a quality gate judge performing a final substance check on a software specification.
+
+You receive the complete spec. Your ONLY job is to identify fields that look filled but actually contain:
+1. Generic content that could apply to any spec (not specific to this feature)
+2. Content that contradicts other sections (e.g., security says "No auth" but Gherkin has login scenarios)
+3. Security/test/architecture sections that don't align with the Gherkin acceptance criteria
+4. Fabricated details that sound plausible but weren't derived from real user input
+
+You do NOT check structural completeness (that's handled by other criteria).
+For each problem found, output a CONCERN: line with the specific issue. If no problems, output PASS.
+
 ## Format Reference
 # Each criterion has: name (the ### header), and a set of key-value fields.
 #
@@ -40,6 +52,7 @@
 - and_pattern: Then\s+\w
 - reject_pattern: works as expected|works as specified|the feature is used|the system is configured|expected behavior occurs|feature name|scenario name|TODO|TBD|to be determined|to be defined|needs clarification|prerequisites are defined|actions are specified|expected outcomes are documented|placeholder|the system works correctly|it should work|the result is correct
 - min_matches: Scenario: 2
+- question: What are the key user scenarios? Please describe at least 2 concrete workflows with expected outcomes.
 
 ### 3. Architecture alignment reviewed and constraints captured
 - section: ## Architecture alignment
@@ -60,6 +73,7 @@
 - or_pattern: \| Scenario[[:space:]]*\|
 - and_pattern: (Unit|Integration|E2E|e2e) tests:
 - grep_range: 20
+- question: What test approach is needed? Which scenarios need unit vs integration vs e2e tests?
 
 ### 6. Repo golden commands known or explicitly blocked
 - section: ## Test strategy
@@ -80,15 +94,23 @@
 - section: ## Code structure
 - pattern: - Module pattern:[[:space:]]*[^[:space:]]
 - grep_range: 10
+- question: What is the expected code structure? Which modules or patterns should be used?
 
 ### 10. Engineering principles captured
 - section: ## Engineering principles and DoD additions
 - pattern: ^-[[:space:]]*[^[:space:]]
 - grep_range: 15
+- question: What engineering principles or definition-of-done criteria apply to this work?
 
 ### 11. Fields contain distinct content
 - special: check_duplicate_fields
+- question: The Context, Goal, Requirements, and Scope fields contain duplicate content. Can you provide distinct descriptions for each?
 
 ### 12. Sufficient detail provided
 - special: check_substance_threshold
 - min_substance: 4
+- question: The spec lacks sufficient detail. Can you provide more context about the problem, goals, and specific requirements?
+
+### 13. LLM substance check
+- special: llm_substance_check
+- question: The spec contains sections that may not be specific to this feature. Can you verify the content is accurate?
