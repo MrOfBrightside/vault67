@@ -1,0 +1,609 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# forge — Project bootstrapper for vault67 + farm33
+# Creates repos, generates configs, and runs the full pipeline.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VAULT67_DIR="$(cd "$SCRIPT_DIR/../vault67" 2>/dev/null && pwd)" || VAULT67_DIR=""
+FARM33_DIR="$SCRIPT_DIR"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+GRAY='\033[0;90m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()    { echo -e "${BLUE}ℹ${NC} $*"; }
+success() { echo -e "${GREEN}✓${NC} $*"; }
+warn()    { echo -e "${YELLOW}⚠${NC} $*"; }
+error()   { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+load_config() {
+    local conf="$SCRIPT_DIR/.forge.conf"
+    if [ ! -f "$conf" ]; then
+        error "Config not found: $conf\nCopy .forge.conf.example to .forge.conf and fill in your values."
+    fi
+    # shellcheck disable=SC1090
+    source "$conf"
+
+    : "${FORGEJO_TOKEN:?FORGEJO_TOKEN is required in .forge.conf}"
+    : "${FORGEJO_API:=https://git.logikfabriken.se/api/v1}"
+    : "${FORGEJO_OWNER:?FORGEJO_OWNER is required in .forge.conf}"
+    : "${OLLAMA_URL:=http://localhost:11434}"
+    : "${OLLAMA_MODEL:=qwen2.5-coder:14b}"
+}
+
+# ---------------------------------------------------------------------------
+# API helpers
+# ---------------------------------------------------------------------------
+
+api_request() {
+    local method="$1" endpoint="$2" data="${3:-}"
+    local url="${FORGEJO_API}${endpoint}"
+    local args=(-s -X "$method" -H "Authorization: token ${FORGEJO_TOKEN}" -H "Content-Type: application/json")
+
+    if [ -n "$data" ]; then
+        args+=(-d "$data")
+    fi
+
+    local response http_code
+    response=$(curl "${args[@]}" -w "\n%{http_code}" "$url") || error "API request failed: $url"
+    http_code=$(echo "$response" | tail -1)
+    response=$(echo "$response" | sed '$d')
+
+    if [[ "$http_code" -ge 400 ]]; then
+        error "API error ($http_code): $response"
+    fi
+
+    echo "$response"
+}
+
+# ---------------------------------------------------------------------------
+# forge new
+# ---------------------------------------------------------------------------
+
+cmd_new() {
+    local name="" description="" existing=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --desc|--description) description="$2"; shift 2 ;;
+            --existing)           existing="$2"; shift 2 ;;
+            -h|--help)
+                echo "Usage: forge new <name> [--desc \"...\"] [--existing owner/repo]"
+                echo ""
+                echo "Creates a new project: Forgejo repo + vault67/farm33 configs."
+                echo ""
+                echo "Options:"
+                echo "  --desc \"...\"          Project description (used to create tickets)"
+                echo "  --existing owner/repo  Skip repo creation, connect to existing repo"
+                exit 0
+                ;;
+            *)
+                if [ -z "$name" ]; then
+                    name="$1"; shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    [ -z "$name" ] && [ -z "$existing" ] && error "Usage: forge new <name> [--desc \"...\"] [--existing owner/repo]"
+
+    local repo_fullname clone_url
+
+    if [ -n "$existing" ]; then
+        # Connect to existing repo
+        repo_fullname="$existing"
+        info "Connecting to existing repo: $repo_fullname"
+
+        local repo_response
+        repo_response=$(api_request "GET" "/repos/${repo_fullname}")
+        clone_url=$(echo "$repo_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['clone_url'])")
+        name=$(echo "$repo_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+        success "Found repo: $repo_fullname ($clone_url)"
+    else
+        # Create new repo
+        repo_fullname="${FORGEJO_OWNER}/${name}"
+        info "Creating Forgejo repo: $repo_fullname"
+
+        local repo_json
+        repo_json=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'name': sys.argv[1],
+    'auto_init': True,
+    'default_branch': 'main',
+    'description': sys.argv[2] if len(sys.argv) > 2 else ''
+}))
+" "$name" "${description:-}")
+
+        local repo_response
+        repo_response=$(api_request "POST" "/user/repos" "$repo_json")
+
+        clone_url=$(echo "$repo_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['clone_url'])")
+        success "Created repo: $repo_fullname ($clone_url)"
+    fi
+
+    # Ensure pipeline state labels exist in the repo
+    _ensure_labels "$repo_fullname"
+
+    # Generate vault67 config
+    if [ -n "$VAULT67_DIR" ]; then
+        cat > "$VAULT67_DIR/.vault67.conf" <<VCONF
+# Generated by forge for project: $name
+FORGEJO_TOKEN=${FORGEJO_TOKEN}
+FORGEJO_API=${FORGEJO_API}
+FORGEJO_REPO=${repo_fullname}
+OLLAMA_URL=${OLLAMA_URL}
+OLLAMA_MODEL=${OLLAMA_MODEL}
+VCONF
+        success "Generated vault67/.vault67.conf → $repo_fullname"
+    else
+        warn "vault67 directory not found, skipping vault67 config"
+    fi
+
+    # Generate farm33 config
+    # Note: OLLAMA_URL intentionally omitted — Dockerfile sets it for Docker,
+    # farm33 defaults to localhost for local runs.
+    cat > "$FARM33_DIR/.farm33.conf" <<FCONF
+# Generated by forge for project: $name
+FORGEJO_TOKEN=${FORGEJO_TOKEN}
+FORGEJO_API=${FORGEJO_API}
+FORGEJO_REPO=${repo_fullname}
+OLLAMA_MODEL=${OLLAMA_MODEL}
+OLLAMA_TIMEOUT=300
+TARGET_REPO_URL=${clone_url}
+TARGET_REPO_BRANCH=main
+POOL_SIZE=3
+BRANCH_PREFIX=farm33
+MAX_RETRIES=2
+MAX_REFINEMENT_ITERATIONS=3
+FCONF
+    success "Generated farm33/.farm33.conf → $repo_fullname"
+
+    # Create tickets from description if provided
+    if [ -n "$description" ]; then
+        echo ""
+        info "Breaking down project description into tickets..."
+        if [ -n "$VAULT67_DIR" ] && [ -x "$VAULT67_DIR/vault67" ]; then
+            "$VAULT67_DIR/vault67" project create "$name" "$description"
+        else
+            warn "vault67 not found — skipping ticket creation"
+            info "Create tickets manually or run: vault67 project create \"$name\" \"$description\""
+        fi
+    fi
+
+    echo ""
+    success "Project '$name' is ready!"
+    echo ""
+    echo "  Next steps:"
+    echo "    forge status              # See pipeline state"
+    if [ -z "$description" ]; then
+        echo "    forge tickets \"desc\"      # Create tickets from a description"
+    fi
+    echo "    forge refine --all        # Refine all NEW tickets"
+    echo "    forge implement --all     # Implement READY tickets"
+    echo "    forge pipeline            # Full refine → implement cycle"
+}
+
+# ---------------------------------------------------------------------------
+# forge refine
+# ---------------------------------------------------------------------------
+
+cmd_refine() {
+    local all=false issue=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --all) all=true; shift ;;
+            -h|--help)
+                echo "Usage: forge refine [--all | <issue-number>]"
+                exit 0
+                ;;
+            *)
+                if [[ "$1" =~ ^[0-9]+$ ]]; then
+                    issue="$1"; shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    _require_vault67
+
+    if [ -n "$issue" ]; then
+        info "Refining issue #${issue}..."
+        "$VAULT67_DIR/vault67" refine "$issue"
+        return
+    fi
+
+    # Default: refine all NEW issues
+    info "Finding issues to refine..."
+
+    local issues
+    issues=$(_list_issues_by_state "NEW")
+
+    if [ -z "$issues" ]; then
+        # Also check NEEDS_INFO that might have been answered
+        issues=$(_list_issues_by_state "NEEDS_INFO")
+        if [ -z "$issues" ]; then
+            success "No issues to refine — all are refined or in progress"
+            return
+        fi
+        info "Found issues in NEEDS_INFO state (re-running refinement)..."
+    fi
+
+    local count=0
+    while IFS=$'\t' read -r num title; do
+        [ -z "$num" ] && continue
+        count=$((count + 1))
+        echo ""
+        info "[${count}] Refining #${num}: $title"
+        "$VAULT67_DIR/vault67" refine "$num" || warn "Issue #${num} did not complete refinement"
+    done <<< "$issues"
+
+    echo ""
+    success "Refinement pass complete ($count issues processed)"
+    echo "  Run 'forge status' to see results"
+}
+
+# ---------------------------------------------------------------------------
+# forge implement
+# ---------------------------------------------------------------------------
+
+cmd_implement() {
+    local all=false issue=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --all) all=true; shift ;;
+            -h|--help)
+                echo "Usage: forge implement [--all | <issue-number>]"
+                exit 0
+                ;;
+            *)
+                if [[ "$1" =~ ^[0-9]+$ ]]; then
+                    issue="$1"; shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    _require_farm33
+
+    if [ -n "$issue" ]; then
+        info "Implementing issue #${issue} (Docker)..."
+        docker compose -f "$FARM33_DIR/docker-compose.yml" \
+            run --rm cli run "$issue"
+        return
+    fi
+
+    # Default: batch all READY_TO_IMPLEMENT
+    info "Dispatching to farm33 worker pool (Docker)..."
+    docker compose -f "$FARM33_DIR/docker-compose.yml" \
+        run --rm cli batch
+}
+
+# ---------------------------------------------------------------------------
+# forge pipeline
+# ---------------------------------------------------------------------------
+
+cmd_pipeline() {
+    info "Running full pipeline: refine → implement"
+    echo ""
+
+    # Step 1: Refine all
+    echo -e "${BOLD}═══ Phase 1: Refinement ═══${NC}"
+    cmd_refine --all
+
+    echo ""
+
+    # Step 2: Check state
+    local ready needs_info
+    ready=$(_list_issues_by_state "READY_TO_IMPLEMENT")
+    needs_info=$(_list_issues_by_state "NEEDS_INFO")
+
+    local ready_count=0 needs_count=0
+    if [ -n "$ready" ]; then
+        ready_count=$(echo "$ready" | wc -l | tr -d ' ')
+    fi
+    if [ -n "$needs_info" ]; then
+        needs_count=$(echo "$needs_info" | wc -l | tr -d ' ')
+    fi
+
+    echo -e "${BOLD}═══ Refinement Summary ═══${NC}"
+    echo "  READY_TO_IMPLEMENT: $ready_count"
+    echo "  NEEDS_INFO:         $needs_count"
+
+    if [ "$needs_count" -gt 0 ]; then
+        echo ""
+        warn "Some issues need answers before implementation:"
+        while IFS=$'\t' read -r num title; do
+            [ -z "$num" ] && continue
+            echo -e "  ${MAGENTA}#${num}${NC}  $title"
+            echo "       Run: vault67 questions $num"
+        done <<< "$needs_info"
+        echo ""
+        warn "Answer questions, then re-run: forge pipeline"
+        return 1
+    fi
+
+    if [ "$ready_count" -eq 0 ]; then
+        warn "No issues are READY_TO_IMPLEMENT"
+        return 1
+    fi
+
+    # Step 3: Implement all
+    echo ""
+    echo -e "${BOLD}═══ Phase 2: Implementation ═══${NC}"
+    cmd_implement --all
+
+    echo ""
+    success "Pipeline complete!"
+    echo "  Run 'forge status' to see results"
+}
+
+# ---------------------------------------------------------------------------
+# forge status
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+    load_config
+
+    # Get FORGEJO_REPO from vault67 or farm33 config
+    local repo=""
+    if [ -f "$FARM33_DIR/.farm33.conf" ]; then
+        repo=$(grep -E '^FORGEJO_REPO=' "$FARM33_DIR/.farm33.conf" | cut -d= -f2-)
+    elif [ -n "$VAULT67_DIR" ] && [ -f "$VAULT67_DIR/.vault67.conf" ]; then
+        repo=$(grep -E '^FORGEJO_REPO=' "$VAULT67_DIR/.vault67.conf" | cut -d= -f2-)
+    fi
+    [ -z "$repo" ] && error "No project configured. Run 'forge new' first."
+
+    local project_name="${repo##*/}"
+
+    local response
+    response=$(api_request "GET" "/repos/${repo}/issues?state=all&type=issues&limit=50")
+
+    python3 -c "
+import sys, json
+
+issues = json.loads(sys.stdin.read())
+if not issues:
+    print('No issues found')
+    sys.exit(0)
+
+# Group by state
+states = {
+    'NEW': [],
+    'REFINING': [],
+    'NEEDS_INFO': [],
+    'READY_TO_IMPLEMENT': [],
+    'IMPLEMENTING': [],
+    'DONE': [],
+    'OTHER': [],
+}
+
+colors = {
+    'NEW':                '\033[0;34m',
+    'REFINING':           '\033[1;33m',
+    'NEEDS_INFO':         '\033[0;35m',
+    'READY_TO_IMPLEMENT': '\033[0;32m',
+    'IMPLEMENTING':       '\033[1;33m',
+    'DONE':               '\033[0;90m',
+    'OTHER':              '\033[0m',
+}
+NC = '\033[0m'
+BOLD = '\033[1m'
+
+for issue in sorted(issues, key=lambda i: i['number']):
+    labels = [l['name'] for l in issue.get('labels', [])]
+    state_label = next((l for l in labels if l.startswith('state:')), '')
+    state = state_label.replace('state:', '') if state_label else 'OTHER'
+    if state not in states:
+        state = 'OTHER'
+    states[state].append(issue)
+
+# Header
+print(f'{BOLD}$project_name Pipeline Status{NC}')
+print('━' * 40)
+
+total = len(issues)
+done = len(states['DONE'])
+
+for state_name in ['NEW', 'REFINING', 'NEEDS_INFO', 'READY_TO_IMPLEMENT', 'IMPLEMENTING', 'DONE', 'OTHER']:
+    group = states[state_name]
+    if not group:
+        continue
+    c = colors[state_name]
+    label = state_name.replace('_', ' ')
+    for issue in group:
+        # Count questions for NEEDS_INFO
+        extra = ''
+        if state_name == 'NEEDS_INFO':
+            comments = issue.get('comments', 0)
+            if comments:
+                extra = f' ({comments} comments)'
+        closed = ' [closed]' if issue.get('state') == 'closed' and state_name != 'DONE' else ''
+        print(f'  {c}{label:20s}{NC}  #{issue[\"number\"]:3d}  {issue[\"title\"]}{extra}{closed}')
+
+print()
+print(f'  Total: {total}  |  Done: {done}/{total}')
+" <<< "$response"
+}
+
+# ---------------------------------------------------------------------------
+# forge tickets
+# ---------------------------------------------------------------------------
+
+cmd_tickets() {
+    local description="$*"
+    [ -z "$description" ] && error "Usage: forge tickets <description>"
+
+    _require_vault67
+
+    # Get project name from config
+    local repo=""
+    if [ -f "$FARM33_DIR/.farm33.conf" ]; then
+        repo=$(grep -E '^FORGEJO_REPO=' "$FARM33_DIR/.farm33.conf" | cut -d= -f2-)
+    elif [ -n "$VAULT67_DIR" ] && [ -f "$VAULT67_DIR/.vault67.conf" ]; then
+        repo=$(grep -E '^FORGEJO_REPO=' "$VAULT67_DIR/.vault67.conf" | cut -d= -f2-)
+    fi
+    [ -z "$repo" ] && error "No project configured. Run 'forge new' first."
+
+    local project_name="${repo##*/}"
+
+    info "Adding tickets to $project_name from description..."
+    "$VAULT67_DIR/vault67" project create "$project_name" "$description"
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_ensure_labels() {
+    local repo="$1"
+    local -a labels=(
+        "state:NEW:#0075ca"
+        "state:REFINING:#e4e669"
+        "state:NEEDS_INFO:#d876e3"
+        "state:READY_TO_IMPLEMENT:#0e8a16"
+        "state:IMPLEMENTING:#e4e669"
+        "state:DONE:#666666"
+        "state:BREAKDOWN:#fbca04"
+    )
+
+    info "Ensuring pipeline labels exist..."
+    for entry in "${labels[@]}"; do
+        local lname="${entry%%:*}:${entry#*:}"
+        lname="${entry%:*}"
+        local color="${entry##*:}"
+        color="${color#\#}"
+
+        local json
+        json=$(python3 -c "
+import json, sys
+print(json.dumps({'name': sys.argv[1], 'color': sys.argv[2]}))
+" "$lname" "$color")
+
+        # POST label — 409 means it already exists, that's fine
+        local result http_code
+        result=$(curl -s -X POST \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$json" \
+            -w "\n%{http_code}" \
+            "${FORGEJO_API}/repos/${repo}/labels") || true
+        http_code=$(echo "$result" | tail -1)
+        if [[ "$http_code" == "201" ]] || [[ "$http_code" == "409" ]]; then
+            : # ok
+        elif [[ "$http_code" == "422" ]]; then
+            : # label already exists (Forgejo returns 422 for duplicate)
+        else
+            warn "Could not create label $lname (HTTP $http_code)"
+        fi
+    done
+    success "Pipeline labels ready"
+}
+
+_require_vault67() {
+    if [ -z "$VAULT67_DIR" ] || [ ! -x "$VAULT67_DIR/vault67" ]; then
+        error "vault67 not found. Expected at: $(dirname "$SCRIPT_DIR")/vault67/vault67"
+    fi
+}
+
+_require_farm33() {
+    if [ ! -x "$FARM33_DIR/farm33" ]; then
+        error "farm33 not found at: $FARM33_DIR/farm33"
+    fi
+}
+
+_list_issues_by_state() {
+    local state="$1"
+    load_config
+
+    # Get FORGEJO_REPO from generated configs
+    local repo=""
+    if [ -f "$FARM33_DIR/.farm33.conf" ]; then
+        repo=$(grep -E '^FORGEJO_REPO=' "$FARM33_DIR/.farm33.conf" | cut -d= -f2-)
+    elif [ -n "$VAULT67_DIR" ] && [ -f "$VAULT67_DIR/.vault67.conf" ]; then
+        repo=$(grep -E '^FORGEJO_REPO=' "$VAULT67_DIR/.vault67.conf" | cut -d= -f2-)
+    fi
+    [ -z "$repo" ] && return
+
+    local response
+    response=$(api_request "GET" "/repos/${repo}/issues?state=open&type=issues&limit=50&labels=state:${state}" 2>/dev/null) || return
+
+    python3 -c "
+import sys, json
+issues = json.loads(sys.stdin.read())
+for issue in sorted(issues, key=lambda i: i['number']):
+    print(f'{issue[\"number\"]}\t{issue[\"title\"]}')
+" <<< "$response" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+cmd_help() {
+    cat <<'HELP'
+forge — Project bootstrapper for vault67 + farm33
+
+Usage: forge <command> [options]
+
+Commands:
+  new <name> [--desc "..."]   Create project (repo + configs + tickets)
+  refine [--all | <issue>]    Refine specs via vault67
+  implement [--all | <issue>] Implement via farm33
+  pipeline                    Full cycle: refine all → implement all
+  status                      Show per-issue pipeline state
+  tickets <description>       Add more tickets to current project
+  help                        Show this help
+
+Examples:
+  forge new "TodoApp" --desc "REST API with auth, CRUD, and search"
+  forge refine --all
+  forge implement 42
+  forge pipeline
+  forge status
+HELP
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    # Commands that need config loaded early
+    case "$cmd" in
+        new|refine|implement|pipeline|tickets)
+            load_config
+            ;;
+    esac
+
+    case "$cmd" in
+        new)       cmd_new "$@" ;;
+        refine)    cmd_refine "$@" ;;
+        implement) cmd_implement "$@" ;;
+        pipeline)  cmd_pipeline "$@" ;;
+        status)    cmd_status "$@" ;;
+        tickets)   cmd_tickets "$@" ;;
+        help|-h|--help) cmd_help ;;
+        *)         error "Unknown command: $cmd. Run 'forge help' for usage." ;;
+    esac
+}
+
+main "$@"

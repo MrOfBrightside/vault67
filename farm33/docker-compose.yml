@@ -1,0 +1,29 @@
+services:
+  cli:
+    build: .
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .farm33.conf
+        required: false
+    volumes:
+      - ./logs:/app/logs
+      - ./.repo.git:/app/.repo.git
+      - ./worktrees:/app/worktrees
+      - ./.locks:/app/.locks
+    profiles: ["cli"]
+
+  farm33:
+    build: .
+    container_name: farm33
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .farm33.conf
+        required: false
+    volumes:
+      - ./logs:/app/logs
+      - ./.repo.git:/app/.repo.git
+      - ./worktrees:/app/worktrees
+      - ./.locks:/app/.locks
+    restart: unless-stopped

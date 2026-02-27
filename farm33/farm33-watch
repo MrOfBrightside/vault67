@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# farm33-watch - Daemon polling for READY_TO_IMPLEMENT issues
+# Usage: farm33-watch [--interval <seconds>]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FARM33="$SCRIPT_DIR/farm33"
+
+# Load config for defaults
+if [ -f "$SCRIPT_DIR/.farm33.conf" ]; then
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/.farm33.conf"
+fi
+
+POLL_INTERVAL="${POLL_INTERVAL:-60}"
+
+# Parse args
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --interval) POLL_INTERVAL="$2"; shift 2 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+log() {
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] [watch] $*"
+}
+
+log "farm33-watch starting (poll every ${POLL_INTERVAL}s)"
+log "API: ${FORGEJO_API:-not set}"
+log "Repo: ${FORGEJO_REPO:-not set}"
+
+if [ -z "${FORGEJO_TOKEN:-}" ] || [ -z "${FORGEJO_API:-}" ] || [ -z "${FORGEJO_REPO:-}" ]; then
+    log "ERROR: FORGEJO_TOKEN, FORGEJO_API, and FORGEJO_REPO must be set"
+    exit 1
+fi
+
+LOCKDIR="$SCRIPT_DIR/.locks"
+mkdir -p "$LOCKDIR"
+
+while true; do
+    # Fetch open issues with state:READY_TO_IMPLEMENT label
+    response=$(curl -s \
+        -H "Authorization: token ${FORGEJO_TOKEN}" \
+        -H "Accept: application/json" \
+        "${FORGEJO_API}/repos/${FORGEJO_REPO}/issues?state=open&type=issues&labels=state:READY_TO_IMPLEMENT&limit=50" 2>/dev/null || echo "[]")
+
+    ready_issues=$(echo "$response" | python3 -c "
+import sys, json
+try:
+    issues = json.load(sys.stdin)
+    for issue in issues:
+        labels = [l['name'] for l in issue.get('labels', [])]
+        # Skip parent issues with subtasks
+        if 'has:subtasks' in labels:
+            continue
+        print(issue['number'])
+except:
+    pass
+" 2>/dev/null)
+
+    if [ -n "$ready_issues" ]; then
+        issues_to_dispatch=()
+        for issue_num in $ready_issues; do
+            # Skip if already being worked on
+            if [ -f "$LOCKDIR/issue-${issue_num}.lock" ]; then
+                continue
+            fi
+
+            # Check dependencies via Forgejo API
+            deps_response=$(curl -s \
+                -H "Authorization: token ${FORGEJO_TOKEN}" \
+                -H "Accept: application/json" \
+                "${FORGEJO_API}/repos/${FORGEJO_REPO}/issues/${issue_num}/dependencies" 2>/dev/null || echo "[]")
+            blockers=$(echo "$deps_response" | python3 -c "
+import sys, json
+try:
+    deps = json.load(sys.stdin)
+    for d in deps:
+        if d.get('state') != 'closed':
+            print(d['number'])
+except:
+    pass
+" 2>/dev/null)
+            if [ -n "$blockers" ]; then
+                log "Issue #${issue_num} blocked by #$(echo "$blockers" | tr '\n' ',')"
+                continue
+            fi
+
+            issues_to_dispatch+=("$issue_num")
+        done
+
+        if [ ${#issues_to_dispatch[@]} -gt 0 ]; then
+            log "Dispatching ${#issues_to_dispatch[@]} issues: ${issues_to_dispatch[*]}"
+            "$FARM33" batch "${issues_to_dispatch[@]}" 2>&1 | while IFS= read -r line; do
+                [ -n "$line" ] && log "$line"
+            done
+        fi
+    fi
+
+    sleep "$POLL_INTERVAL"
+done
