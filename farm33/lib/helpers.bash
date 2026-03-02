@@ -25,7 +25,37 @@ warn()    { echo -e "${YELLOW}⚠ $*${NC}" >&2; }
 
 log_worker() {
     local worker_id="${WORKER_ID:-main}"
-    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] [worker-${worker_id}] $*" >&2
+    local issue_ctx=""
+    if [ -n "${CURRENT_ISSUE:-}" ]; then
+        issue_ctx=" [issue-#${CURRENT_ISSUE}]"
+    fi
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] [worker-${worker_id}]${issue_ctx} $*" >&2
+}
+
+# Structured logging — JSON-formatted log lines for machine parsing.
+# Usage: log_structured <level> <message>
+# Levels: info, warn, error
+# Reads WORKER_ID and CURRENT_ISSUE from environment.
+# Only writes if FARM33_STRUCTURED_LOG is set to a file path.
+log_structured() {
+    [ -n "${FARM33_STRUCTURED_LOG:-}" ] || return 0
+
+    local level="$1"
+    local msg="$2"
+
+    python3 -c "
+import json, sys, datetime
+entry = {
+    'ts': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'worker': sys.argv[1],
+    'issue': int(sys.argv[2]) if sys.argv[2] else None,
+    'level': sys.argv[3],
+    'msg': sys.argv[4]
+}
+# Remove None values
+entry = {k: v for k, v in entry.items() if v is not None}
+print(json.dumps(entry, separators=(',', ':')))
+" "${WORKER_ID:-main}" "${CURRENT_ISSUE:-}" "$level" "$msg" >> "$FARM33_STRUCTURED_LOG" 2>/dev/null || true
 }
 
 extract_issue_title() {

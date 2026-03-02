@@ -213,86 +213,7 @@ except Exception:
 # Section 3: Ollama
 # ============================================================================
 
-ollama_generate() {
-    local prompt="$1"
-    local system_prompt="${2:-}"
-    local response_file
-    response_file=$(mktemp)
-    register_temp_file "$response_file"
-
-    local json_payload
-    if [ -n "$system_prompt" ]; then
-        json_payload=$(python3 -c "
-import json, sys
-print(json.dumps({
-    'model': sys.argv[1],
-    'prompt': sys.argv[2],
-    'system': sys.argv[3],
-    'stream': False
-}))
-" "$OLLAMA_MODEL" "$prompt" "$system_prompt")
-    else
-        json_payload=$(python3 -c "
-import json, sys
-print(json.dumps({
-    'model': sys.argv[1],
-    'prompt': sys.argv[2],
-    'stream': False
-}))
-" "$OLLAMA_MODEL" "$prompt")
-    fi
-
-    if [ -z "$json_payload" ]; then
-        rm -f "$response_file"
-        return 1
-    fi
-
-    local http_code
-    http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$OLLAMA_TIMEOUT" \
-        -X POST "${OLLAMA_URL}/api/generate" \
-        -H "Content-Type: application/json" \
-        -d "$json_payload" \
-        -o "$response_file" 2>/dev/null) || {
-        rm -f "$response_file"
-        return 1
-    }
-
-    if [[ "$http_code" != "200" ]]; then
-        if grep -q "model.*not found\|no such model" "$response_file" 2>/dev/null; then
-            warn "Model '${OLLAMA_MODEL}' not found — pulling..."
-            if command -v ollama >/dev/null 2>&1 && ollama pull "$OLLAMA_MODEL" 2>&1 | tail -1; then
-                success "Model '${OLLAMA_MODEL}' pulled"
-                rm -f "$response_file"
-                http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$OLLAMA_TIMEOUT" \
-                    -X POST "${OLLAMA_URL}/api/generate" \
-                    -H "Content-Type: application/json" \
-                    -d "$json_payload" \
-                    -o "$response_file" 2>/dev/null) || {
-                    rm -f "$response_file"
-                    return 1
-                }
-                [[ "$http_code" != "200" ]] && { rm -f "$response_file"; return 1; }
-            else
-                rm -f "$response_file"
-                return 1
-            fi
-        else
-            rm -f "$response_file"
-            return 1
-        fi
-    fi
-
-    local response_text
-    response_text=$(python3 -c "
-import json, sys
-data = json.load(open(sys.argv[1]), strict=False)
-print(data.get('response', ''))
-" "$response_file" 2>/dev/null)
-
-    rm -f "$response_file"
-    [ -z "$response_text" ] && return 1
-    echo "$response_text"
-}
+# ollama_generate() is provided by lib/common.bash (sourced via lib/helpers.bash)
 
 ollama_chat() {
     local messages_json="$1"
@@ -1352,6 +1273,7 @@ Implements #${issue_number}
     local pr_url
     pr_url=$(echo "$pr_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('html_url',''))" 2>/dev/null)
     log_worker "PR created: ${pr_url}"
+    log_structured info "PR created: ${pr_url}"
     echo "$pr_url"
 }
 
@@ -1370,7 +1292,9 @@ worker_run() {
     echo "$worker_id" > "$lock_path/worker"
     echo "$issue_number" > "$LOCKDIR/worker-${worker_id}.lock"
 
+    export CURRENT_ISSUE="$issue_number"
     log_worker "=== Starting work on issue #${issue_number} ==="
+    log_structured info "issue picked up by worker"
 
     # Step 1: Claim issue
     log_worker "Claiming issue #${issue_number}..."
@@ -1405,12 +1329,14 @@ worker_run() {
         log_worker "Worktree: ${wt_dir}"
 
         # Step 4: Generate plan
+        log_structured info "build started — generating plan"
         local plan_json
         plan_json=$(generate_plan "$promptpack" "$wt_dir") || error "Plan generation failed"
         log_worker "Plan: $(echo "$plan_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d[\"files\"])} files, commit: {d[\"commit_message\"]}')" 2>/dev/null)"
 
         # Step 5: Generate files
         apply_files "$wt_dir" "$plan_json" "$promptpack"
+        log_structured info "code generation complete"
 
         # Step 6: Generate spec-derived tests
         generate_spec_tests "$wt_dir" "$promptpack"
@@ -1474,9 +1400,11 @@ ${build_errors}
 
 "
                     log_worker "Build FAILED"
+                    log_structured error "build failed (iteration ${iteration})"
                 else
                     rm -f "$build_output_file"
                     log_worker "Build PASSED"
+                    log_structured info "build passed (iteration ${iteration})"
                 fi
             fi
 
@@ -1488,6 +1416,7 @@ ${build_errors}
                 register_temp_file "$test_output_file"
                 if safe_eval_cmd "$wt_dir" "$test_cmd" > "$test_output_file" 2>&1; then
                     log_worker "Tests PASSED"
+                    log_structured info "tests passed (iteration ${iteration})"
                     rm -f "$test_output_file"
                 else
                     tests_passed="false"
@@ -1502,6 +1431,7 @@ ${test_errors}
 
 "
                     log_worker "Tests FAILED"
+                    log_structured error "tests failed (iteration ${iteration})"
                 fi
             fi
 
@@ -1529,6 +1459,7 @@ ${acc_gaps}
             # === VOTE: All gates pass? ===
             if [ "$gates_ok" = "true" ]; then
                 log_worker "✅ All gates PASSED on iteration ${iteration} — ready"
+                log_structured info "all gates passed (iteration ${iteration})"
                 all_gates_pass=true
                 break
             fi
@@ -1594,6 +1525,7 @@ ${acc_gaps}
         # Update issue state based on final verdict
         if [ "$is_draft" = "false" ]; then
             log_worker "✅ Issue #${issue_number} — DONE (all gates passed, confidence: ${confidence})"
+            log_structured info "issue complete — all gates passed, confidence ${confidence}"
             api_replace_labels "$issue_number" "state:DONE" > /dev/null 2>&1 || warn "Failed to set DONE label on #${issue_number}"
             local done_comment="🤖 **farm33** — Implementation complete ✅
 
@@ -1611,6 +1543,7 @@ PR: ${pr_url}"
             api_close_issue "$issue_number" > /dev/null 2>&1 || warn "Failed to close #${issue_number}"
         else
             log_worker "⚠️ Issue #${issue_number} — pushed as draft (gates: $([ "$all_gates_pass" = "true" ] && echo "passed" || echo "failed"), confidence: ${confidence:-50})"
+            log_structured warn "issue pushed as draft — gates $([ "$all_gates_pass" = "true" ] && echo "passed" || echo "failed"), confidence ${confidence:-50}"
             api_replace_labels "$issue_number" "state:READY_TO_IMPLEMENT" > /dev/null 2>&1 || warn "Failed to set READY_TO_IMPLEMENT label on #${issue_number}"
             local fail_comment="🤖 **farm33** — Implementation pushed as draft PR
 
@@ -1641,6 +1574,8 @@ Reverting to READY_TO_IMPLEMENT for retry."
     rm -f "$LOCKDIR/issue-${issue_number}.lock" 2>/dev/null || true
 
     log_worker "=== Finished issue #${issue_number} (exit: ${exit_status}) ==="
+    log_structured info "worker finished issue (exit: ${exit_status})"
+    unset CURRENT_ISSUE
     return $exit_status
 }
 
@@ -1682,6 +1617,8 @@ pool_dispatch() {
     echo "$issue_number" > "$LOCKDIR/worker-${worker_id}.lock"
 
     info "Dispatching #${issue_number} to worker ${worker_id}"
+    WORKER_ID="$worker_id" CURRENT_ISSUE="$issue_number" \
+        log_structured info "issue dispatched to worker"
     tmux new-session -d -s "farm33-worker-${worker_id}" \
         "bash -c '\"$SCRIPT_DIR/farm33\" _worker ${issue_number} ${worker_id} 2>&1 | tee \"$LOGS_DIR/worker-${worker_id}.log\"'"
 
@@ -1959,12 +1896,13 @@ Configuration:
   Copy .farm33.conf.example to .farm33.conf and set your tokens.
 
 Environment:
-  FORGEJO_TOKEN    Forgejo API token
-  FORGEJO_API      Forgejo API URL
-  FORGEJO_REPO     Owner/Repo
-  OLLAMA_URL       Ollama API URL (default: http://localhost:11434)
-  OLLAMA_MODEL     Model name (default: qwen2.5-coder:14b)
-  POOL_SIZE        Worker pool size (default: 3)
+  FORGEJO_TOKEN            Forgejo API token
+  FORGEJO_API              Forgejo API URL
+  FORGEJO_REPO             Owner/Repo
+  OLLAMA_URL               Ollama API URL (default: http://localhost:11434)
+  OLLAMA_MODEL             Model name (default: qwen2.5-coder:14b)
+  POOL_SIZE                Worker pool size (default: 3)
+  FARM33_STRUCTURED_LOG    Path for JSON-formatted structured log (optional)
 HELP
 }
 

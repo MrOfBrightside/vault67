@@ -32,3 +32,108 @@ safe_cleanup() {
         fi
     done
 }
+
+# ============================================================================
+# Ollama LLM helpers (shared by vault67 and farm33)
+# ============================================================================
+# Requires: OLLAMA_URL, OLLAMA_MODEL set by the calling script's load_config()
+# Requires: warn(), success() defined by the calling script's helpers.bash
+#           (bash resolves these at call time, not definition time)
+# Optional: OLLAMA_TIMEOUT (defaults to 120 seconds)
+
+# Usage: ollama_generate "prompt text" ["system prompt"]
+# Returns: response text on stdout, non-zero exit on failure
+ollama_generate() {
+    local prompt="$1"
+    local system_prompt="${2:-}"
+    local response_file
+    response_file=$(mktemp)
+    register_temp_file "$response_file"
+
+    local timeout="${OLLAMA_TIMEOUT:-120}"
+
+    # Build JSON payload using python3 for safe escaping
+    local json_payload
+    if [ -n "$system_prompt" ]; then
+        json_payload=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'model': sys.argv[1],
+    'prompt': sys.argv[2],
+    'system': sys.argv[3],
+    'stream': False
+}))
+" "$OLLAMA_MODEL" "$prompt" "$system_prompt" 2>/dev/null)
+    else
+        json_payload=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'model': sys.argv[1],
+    'prompt': sys.argv[2],
+    'stream': False
+}))
+" "$OLLAMA_MODEL" "$prompt" 2>/dev/null)
+    fi
+
+    if [ -z "$json_payload" ]; then
+        rm -f "$response_file"
+        return 1
+    fi
+
+    local http_code
+    http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$timeout" \
+        -X POST "${OLLAMA_URL}/api/generate" \
+        -H "Content-Type: application/json" \
+        -d "$json_payload" \
+        -o "$response_file" 2>/dev/null) || {
+        rm -f "$response_file"
+        return 1
+    }
+
+    if [[ "$http_code" != "200" ]]; then
+        # Check for model not found — auto-pull
+        if grep -q "model.*not found\|no such model" "$response_file" 2>/dev/null; then
+            warn "Model '${OLLAMA_MODEL}' not found — pulling..."
+            if command -v ollama >/dev/null 2>&1 && ollama pull "$OLLAMA_MODEL" 2>&1 | tail -1; then
+                success "Model '${OLLAMA_MODEL}' pulled successfully"
+                rm -f "$response_file"
+                # Retry the request
+                http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$timeout" \
+                    -X POST "${OLLAMA_URL}/api/generate" \
+                    -H "Content-Type: application/json" \
+                    -d "$json_payload" \
+                    -o "$response_file" 2>/dev/null) || {
+                    rm -f "$response_file"
+                    return 1
+                }
+                if [[ "$http_code" != "200" ]]; then
+                    rm -f "$response_file"
+                    return 1
+                fi
+            else
+                rm -f "$response_file"
+                return 1
+            fi
+        else
+            rm -f "$response_file"
+            return 1
+        fi
+    fi
+
+    # Extract .response from JSON (strict=False handles control chars in LLM output)
+    local response_text
+    response_text=$(python3 -c "
+import json, sys
+data = json.load(open(sys.argv[1]), strict=False)
+print(data.get('response', ''))
+" "$response_file" 2>/dev/null)
+
+    rm -f "$response_file"
+
+    if [ -z "$response_text" ]; then
+        return 1
+    fi
+
+    echo "$response_text"
+    return 0
+}
