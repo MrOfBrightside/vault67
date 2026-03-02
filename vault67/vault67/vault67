@@ -539,21 +539,17 @@ judge_agent() {
     requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
 
     # Check 1: Scope defined (in-scope required, out-of-scope is optional)
-    local has_scope=false
     local scope_in
     scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
     if echo "$scope_in" | grep -q -e "^[-•*][[:space:]]*[^[:space:]]"; then
-        has_scope=true
         dor_results+=("[x] Scope in/out defined")
     else
-        has_scope=false
         all_criteria_met=false
         dor_results+=("[ ] Scope in/out defined")
         _judge_add_question "$questions_file" "What is in scope for this work? Please list specific deliverables."
     fi
 
     # Check 2: Gherkin scenarios present, testable, and not generic placeholders
-    local has_gherkin=false
     local _gherkin_fail_reason=""
     local gherkin_block
     gherkin_block=$(echo "$spec_content" | sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p')
@@ -573,82 +569,63 @@ judge_agent() {
             _gherkin_fail_reason="only $_scenario_count scenario (need at least 2)"
         fi
         if [ -n "$_gherkin_fail_reason" ]; then
-            has_gherkin=false
             all_criteria_met=false
             dor_results+=("[ ] Gherkin scenarios are present and testable ($_gherkin_fail_reason)")
         else
-            has_gherkin=true
             dor_results+=("[x] Gherkin scenarios are present and testable")
         fi
     else
-        has_gherkin=false
         all_criteria_met=false
         dor_results+=("[ ] Gherkin scenarios are present and testable")
     fi
 
     # Check 3: Architecture alignment reviewed and constraints captured
-    local has_architecture=false
     if echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Detected stack:[[:space:]]*[^[:space:]]" || \
        echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Constraints:[[:space:]]*[^[:space:]]"; then
-        has_architecture=true
         dor_results+=("[x] Architecture alignment reviewed and constraints captured")
     else
-        has_architecture=false
         all_criteria_met=false
         dor_results+=("[ ] Architecture alignment reviewed and constraints captured")
     fi
 
     # Check 4: Security/compliance reviewed and constraints captured
-    local has_security=false
     if echo "$spec_content" | grep -A 10 "## Security and compliance" | grep -q -e "- [[:alnum:]]*:[[:space:]]*[^[:space:]]" || \
        echo "$spec_content" | grep -A 10 "## Security and compliance" | grep -q -E "N/A|not applicable"; then
-        has_security=true
         dor_results+=("[x] Security/compliance reviewed and constraints captured")
     else
-        has_security=false
         all_criteria_met=false
         dor_results+=("[ ] Security/compliance reviewed and constraints captured")
     fi
 
     # Check 5: Test strategy defined with test layers
-    local has_test_strategy=false
     if echo "$spec_content" | grep -q -e "- Golden build command:[[:space:]]*[^[:space:]]" && \
        echo "$spec_content" | grep -q -e "- Golden test command:[[:space:]]*[^[:space:]]" && \
        echo "$spec_content" | grep -qE "^- (Unit|Integration|E2E|e2e) tests:"; then
-        has_test_strategy=true
         dor_results+=("[x] Test strategy defined with test layers")
     else
-        has_test_strategy=false
         all_criteria_met=false
         dor_results+=("[ ] Test strategy defined with test layers")
     fi
 
     # Check 6: Repo golden commands known or explicitly blocked
-    local has_golden_commands=false
     if echo "$spec_content" | grep -q -e "- Golden build command:[[:space:]]*[^[:space:]]" && \
        echo "$spec_content" | grep -q -e "- Golden test command:[[:space:]]*[^[:space:]]"; then
-        has_golden_commands=true
         dor_results+=("[x] Repo golden commands known or explicitly blocked")
     else
-        has_golden_commands=false
         all_criteria_met=false
         dor_results+=("[ ] Repo golden commands known or explicitly blocked")
     fi
 
     # Check 7: Allowed/forbidden paths set
-    local has_paths=false
     if echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Allowed paths:[[:space:]]*[^[:space:]]" || \
        echo "$spec_content" | grep -A 10 "## Architecture alignment" | grep -q -e "- Forbidden paths:[[:space:]]*[^[:space:]]"; then
-        has_paths=true
         dor_results+=("[x] Allowed/forbidden paths set")
     else
-        has_paths=false
         all_criteria_met=false
         dor_results+=("[ ] Allowed/forbidden paths set")
     fi
 
     # Check 8: No blocking questions remain
-    local has_no_blocking_questions=true
     if [ -f "$questions_file" ]; then
         # Extract blocking questions section
         local questions_section
@@ -660,7 +637,6 @@ judge_agent() {
             # There are questions with content - check if they have answers
             if echo "$questions_section" | grep -E "Answer:\s*$" > /dev/null; then
                 # Questions exist but some answers are empty
-                has_no_blocking_questions=false
                 blocking_questions_exist=true
                 all_criteria_met=false
                 dor_results+=("[ ] No blocking questions remain")
@@ -950,23 +926,23 @@ generate_promptpack() {
 
     # Extract sections from spec.md
     local context
-    context=$(sed -n '/^## Context$/,/^##/p' "$spec_file" | sed '1d;$d')
+    context=$(_get_spec_section "## Context" "$spec_file")
     local goal
-    goal=$(sed -n '/^## Goal$/,/^##/p' "$spec_file" | sed '1d;$d')
+    goal=$(_get_spec_section "## Goal" "$spec_file")
     local scope_in
     scope_in=$(sed -n '/^### In scope$/,/^###/p' "$spec_file" | sed '1d;$d')
     local scope_out
     scope_out=$(sed -n '/^### Out of scope$/,/^##/p' "$spec_file" | sed '1d;$d')
     local gherkin
-    gherkin=$(sed -n '/^## Acceptance Criteria (Gherkin)$/,/^##/p' "$spec_file" | sed '1d;$d')
+    gherkin=$(_get_spec_section "## Acceptance Criteria (Gherkin)" "$spec_file")
     local architecture
-    architecture=$(sed -n '/^## Architecture alignment$/,/^##/p' "$spec_file" | sed '1d;$d')
+    architecture=$(_get_spec_section "## Architecture alignment" "$spec_file")
     local code_structure
-    code_structure=$(sed -n '/^## Code structure$/,/^##/p' "$spec_file" | sed '1d;$d')
+    code_structure=$(_get_spec_section "## Code structure" "$spec_file")
     local security
-    security=$(sed -n '/^## Security and compliance$/,/^##/p' "$spec_file" | sed '1d;$d')
+    security=$(_get_spec_section "## Security and compliance" "$spec_file")
     local test_strategy
-    test_strategy=$(sed -n '/^## Test strategy$/,/^##/p' "$spec_file" | sed '1d;$d')
+    test_strategy=$(_get_spec_section "## Test strategy" "$spec_file")
 
     # Extract golden commands
     local golden_build
@@ -1047,7 +1023,7 @@ architecture_compliance_agent() {
 
     # Check if architecture section already has substantive content
     local existing_arch
-    existing_arch=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    existing_arch=$(_get_spec_section "## Architecture alignment" "$spec_file")
     if echo "$existing_arch" | grep -q -e "- Detected stack:[[:space:]]*[^[:space:]]" || \
        echo "$existing_arch" | grep -q -e "- Relevant modules:[[:space:]]*[^[:space:]]"; then
         success "Architecture alignment section already filled in - preserving"
@@ -1285,7 +1261,7 @@ lead_developer_agent() {
 
     # Check if code structure section already has substantive content
     local existing_cs
-    existing_cs=$(sed -n '/^## Code structure/,/^## /p' "$spec_file" | sed '1d;$d')
+    existing_cs=$(_get_spec_section "## Code structure" "$spec_file")
     if echo "$existing_cs" | grep -q -e "- Module pattern:[[:space:]]*[^[:space:]]"; then
         success "Code structure section already filled in - preserving"
         return 0
@@ -1303,7 +1279,7 @@ lead_developer_agent() {
 
     # --- Step 1: Get detected stack from architecture section ---
     local arch_section
-    arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    arch_section=$(_get_spec_section "## Architecture alignment" "$spec_file")
     local detected_stack
     detected_stack=$(echo "$arch_section" | grep "^- Detected stack:" | sed 's/^- Detected stack:[[:space:]]*//')
 
@@ -1522,7 +1498,7 @@ security_compliance_agent() {
 
     # Check if security section already has substantive content
     local existing_sec
-    existing_sec=$(sed -n '/^## Security and compliance/,/^## /p' "$spec_file" | sed '1d;$d')
+    existing_sec=$(_get_spec_section "## Security and compliance" "$spec_file")
     if echo "$existing_sec" | grep -q -e "- Data classification:[[:space:]]*[^[:space:]]"; then
         success "Security and compliance section already filled in - preserving"
         return 0
@@ -1753,11 +1729,11 @@ spec_enrichment_agent() {
 
     # Extract core fields
     local context
-    context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+    context=$(_get_spec_section "## Context" "$spec_file")
     local goal
-    goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    goal=$(_get_spec_section "## Goal" "$spec_file")
     local requirements
-    requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
+    requirements=$(_get_spec_section "## Requirements" "$spec_file")
     local scope_in
     scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
     local title
@@ -1976,11 +1952,11 @@ ba_translator_agent() {
 
     # Extract key sections from spec.md for the prompt
     local context
-    context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+    context=$(_get_spec_section "## Context" "$spec_file")
     local goal
-    goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    goal=$(_get_spec_section "## Goal" "$spec_file")
     local requirements
-    requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
+    requirements=$(_get_spec_section "## Requirements" "$spec_file")
     local scope_in
     scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
     local scope_out
@@ -2331,7 +2307,7 @@ test_strategy_agent() {
 
     # Check if test strategy already has substantive content (layers defined)
     local existing_test
-    existing_test=$(sed -n '/^## Test strategy/,/^## [^#]/p' "$spec_file" | sed '1d;$d')
+    existing_test=$(_get_spec_section "## Test strategy" "$spec_file")
     if echo "$existing_test" | grep -qE "^- (Unit|Integration|E2E|e2e) tests:"; then
         success "Test strategy already contains test layers - preserving"
         return 0
@@ -2387,7 +2363,7 @@ test_strategy_agent() {
 
     # Check 1: Architecture section in spec (already filled by arch agent)
     local arch_section
-    arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    arch_section=$(_get_spec_section "## Architecture alignment" "$spec_file")
     local detected_stack_info
     detected_stack_info=$(echo "$arch_section" | grep "^- \(Tech stack\|Detected stack\):" | sed 's/^- [^:]*:[[:space:]]*//')
 

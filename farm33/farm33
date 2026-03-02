@@ -697,24 +697,6 @@ run_golden_test() {
     fi
 }
 
-run_golden_build() {
-    local wt_dir="$1"
-    local build_cmd="$2"
-
-    if [ -z "$build_cmd" ]; then
-        return 0
-    fi
-
-    log_worker "Running golden build: ${build_cmd}"
-    if safe_eval_cmd "$wt_dir" "$build_cmd" > /dev/null 2>&1; then
-        log_worker "Build PASSED"
-        return 0
-    else
-        log_worker "Build FAILED"
-        return 1
-    fi
-}
-
 attempt_repair() {
     local wt_dir="$1"
     local test_cmd="$2"

@@ -180,6 +180,16 @@ for d in deps:
 " "${texts[@]}"
 }
 
+# Extract content of a markdown section by header
+# Args: header (e.g. "## Context"), file_path
+# Returns section content without the header line, up to next ## header
+_get_spec_section() {
+    local header="$1"
+    local file="$2"
+    [ -f "$file" ] || return 1
+    sed -n "/^${header}$/,/^## /p" "$file" | sed '1d;$d'
+}
+
 # Clean Gherkin from LLM response (strip markdown fences, extract Feature block)
 # Reads from stdin, writes clean Gherkin to stdout
 clean_gherkin_response() {
