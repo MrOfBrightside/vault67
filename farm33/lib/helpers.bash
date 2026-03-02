@@ -46,6 +46,150 @@ safe_eval_cmd() {
     (cd "$wt_dir" && eval "$cmd")
 }
 
+# Extract golden build/test commands from promptpack text
+# Returns two lines: BUILD_CMD=... and TEST_CMD=...
+extract_golden_commands() {
+    local promptpack="$1"
+    python3 -c "
+import sys, re
+
+text = sys.argv[1]
+build_cmd = ''
+test_cmd = ''
+
+for line in text.split('\n'):
+    stripped = line.strip()
+    if stripped.startswith('- ') or stripped.startswith('* '):
+        stripped = stripped[2:]
+    if 'Golden build command:' in stripped:
+        build_cmd = stripped.split('Golden build command:')[-1].strip()
+        build_cmd = build_cmd.strip('\`')
+    elif 'Golden test command:' in stripped:
+        test_cmd = stripped.split('Golden test command:')[-1].strip()
+        test_cmd = test_cmd.strip('\`')
+
+for section_name, var_name in [('How to build', 'build'), ('How to test', 'test')]:
+    match = re.search(rf'### {section_name}.*?\n(.*?)(?=\n###|\n##|\Z)', text, re.DOTALL)
+    if match:
+        content = match.group(1).strip()
+        if content and content != '(see parent issue)':
+            if var_name == 'build' and not build_cmd:
+                build_cmd = content.strip('\`').strip()
+            elif var_name == 'test' and not test_cmd:
+                test_cmd = content.strip('\`').strip()
+
+print(f'BUILD_CMD={build_cmd}')
+print(f'TEST_CMD={test_cmd}')
+" "$promptpack"
+}
+
+# Extract git base ref from promptpack text
+# Returns branch name (defaults to "main")
+extract_base_ref() {
+    local promptpack="$1"
+    python3 -c "
+import sys, re
+text = sys.argv[1]
+
+m = re.search(r'Base ref:\s*\x60([^\x60]+)\x60', text)
+if m:
+    print(m.group(1))
+    sys.exit(0)
+
+m = re.search(r'### Base ref\n-\s*(\S+)', text)
+if m:
+    print(m.group(1))
+    sys.exit(0)
+
+print('main')
+" "$promptpack"
+}
+
+# Parse JSON object from LLM response (strips markdown fences)
+# Reads from file path $1, validates key in $2 (optional)
+# Returns valid JSON or exits 1
+parse_llm_json_object() {
+    local input_file="$1"
+    local required_key="${2:-}"
+    python3 -c '
+import json, re, sys
+
+text = open(sys.argv[1]).read()
+required_key = sys.argv[2] if len(sys.argv) > 2 else ""
+
+text = re.sub(r"^```\w*\s*\n", "", text)
+text = re.sub(r"\n```\s*$", "", text)
+text = text.strip()
+
+try:
+    obj = json.loads(text)
+    if not required_key or required_key in obj:
+        print(json.dumps(obj))
+        sys.exit(0)
+except SystemExit:
+    raise
+except Exception:
+    pass
+
+# Fallback: brace-matching
+search_key = required_key if required_key else ""
+for m in re.finditer(r"\{", text):
+    start = m.start()
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{": depth += 1
+        elif text[i] == "}": depth -= 1
+        if depth == 0:
+            candidate = text[start:i+1]
+            try:
+                obj = json.loads(candidate)
+                if not search_key or search_key in obj:
+                    print(json.dumps(obj))
+                    sys.exit(0)
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+            break
+
+sys.exit(1)
+' "$input_file" "$required_key"
+}
+
+# Parse JSON array from LLM response (strips markdown fences)
+# Reads from file path $1
+# Returns valid JSON array or exits 1
+parse_llm_json_array() {
+    local input_file="$1"
+    python3 -c '
+import json, re, sys
+
+text = open(sys.argv[1]).read()
+text = re.sub(r"^```\w*\s*\n", "", text)
+text = re.sub(r"\n```\s*$", "", text)
+text = text.strip()
+
+try:
+    arr = json.loads(text)
+    if isinstance(arr, list):
+        print(json.dumps(arr))
+        sys.exit(0)
+except Exception:
+    pass
+
+match = re.search(r"\[[\s\S]*?\]", text)
+if match:
+    try:
+        arr = json.loads(match.group(0))
+        print(json.dumps(arr))
+        sys.exit(0)
+    except Exception:
+        pass
+
+sys.exit(1)
+' "$input_file"
+}
+
 # Temp file tracking for safe cleanup
 _FARM33_TEMP_FILES=()
 

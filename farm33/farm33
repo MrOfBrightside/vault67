@@ -396,66 +396,7 @@ else:
     echo "$body_promptpack"
 }
 
-extract_golden_commands() {
-    local promptpack="$1"
-
-    python3 -c "
-import sys, re
-
-text = sys.argv[1]
-build_cmd = ''
-test_cmd = ''
-
-for line in text.split('\n'):
-    stripped = line.strip()
-    if stripped.startswith('- ') or stripped.startswith('* '):
-        stripped = stripped[2:]
-    if 'Golden build command:' in stripped:
-        build_cmd = stripped.split('Golden build command:')[-1].strip()
-        # Remove backticks
-        build_cmd = build_cmd.strip('\`')
-    elif 'Golden test command:' in stripped:
-        test_cmd = stripped.split('Golden test command:')[-1].strip()
-        test_cmd = test_cmd.strip('\`')
-
-# Also check for section-based format
-for section_name, var_name in [('How to build', 'build'), ('How to test', 'test')]:
-    match = re.search(rf'### {section_name}.*?\n(.*?)(?=\n###|\n##|\Z)', text, re.DOTALL)
-    if match:
-        content = match.group(1).strip()
-        if content and content != '(see parent issue)':
-            if var_name == 'build' and not build_cmd:
-                build_cmd = content.strip('\`').strip()
-            elif var_name == 'test' and not test_cmd:
-                test_cmd = content.strip('\`').strip()
-
-print(f'BUILD_CMD={build_cmd}')
-print(f'TEST_CMD={test_cmd}')
-" "$promptpack"
-}
-
-extract_base_ref() {
-    local promptpack="$1"
-
-    python3 -c "
-import sys, re
-text = sys.argv[1]
-
-# Try 'Base ref: \`main\`' format
-m = re.search(r'Base ref:\s*\x60([^\x60]+)\x60', text)
-if m:
-    print(m.group(1))
-    sys.exit(0)
-
-# Try '### Base ref\n- main' format
-m = re.search(r'### Base ref\n-\s*(\S+)', text)
-if m:
-    print(m.group(1))
-    sys.exit(0)
-
-print('main')
-" "$promptpack"
-}
+# extract_golden_commands and extract_base_ref are now in lib/helpers.bash
 
 # ============================================================================
 # Section 5: Worktree Management
