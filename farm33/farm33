@@ -543,48 +543,7 @@ Respond with ONLY a JSON object (no markdown fences, no explanation):
     _plan_tmpfile=$(mktemp)
     register_temp_file "$_plan_tmpfile"
     printf '%s' "$plan_output" > "$_plan_tmpfile"
-    plan_json=$(python3 -c '
-import json, re, sys
-
-text = open(sys.argv[1]).read()
-
-# Strip markdown fences if present
-text = re.sub(r"^```\w*\s*\n", "", text)
-text = re.sub(r"\n```\s*$", "", text)
-text = text.strip()
-
-try:
-    obj = json.loads(text)
-    if "files" in obj:
-        print(json.dumps(obj))
-        sys.exit(0)
-except SystemExit:
-    raise
-except Exception:
-    pass
-
-# Fallback: find JSON block with "files" key
-for m in re.finditer(r"\{", text):
-    start = m.start()
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{": depth += 1
-        elif text[i] == "}": depth -= 1
-        if depth == 0:
-            candidate = text[start:i+1]
-            try:
-                obj = json.loads(candidate)
-                if "files" in obj:
-                    print(json.dumps(obj))
-                    sys.exit(0)
-            except SystemExit:
-                raise
-            except Exception:
-                pass
-            break
-
-sys.exit(1)
-' "$_plan_tmpfile" 2>/dev/null) || true
+    plan_json=$(parse_llm_json_object "$_plan_tmpfile" "files" 2>/dev/null) || true
     rm -f "$_plan_tmpfile"
 
     if [ -z "$plan_json" ]; then
@@ -808,33 +767,7 @@ print(json.dumps(messages))
     _ar_tmpfile=$(mktemp)
     register_temp_file "$_ar_tmpfile"
     printf '%s' "$repair_output" > "$_ar_tmpfile"
-    patches=$(python3 -c '
-import json, re, sys
-
-text = open(sys.argv[1]).read()
-text = re.sub(r"^```\w*\s*\n", "", text)
-text = re.sub(r"\n```\s*$", "", text)
-text = text.strip()
-
-try:
-    arr = json.loads(text)
-    if isinstance(arr, list):
-        print(json.dumps(arr))
-        sys.exit(0)
-except Exception:
-    pass
-
-match = re.search(r"\[[\s\S]*?\]", text)
-if match:
-    try:
-        arr = json.loads(match.group(0))
-        print(json.dumps(arr))
-        sys.exit(0)
-    except Exception:
-        pass
-
-sys.exit(1)
-' "$_ar_tmpfile" 2>/dev/null) || {
+    patches=$(parse_llm_json_array "$_ar_tmpfile" 2>/dev/null) || {
         rm -f "$_ar_tmpfile"
         log_worker "Could not parse repair patches"
         return 1
@@ -998,33 +931,7 @@ Respond with ONLY a JSON array (no fences, no explanation):
     _st_tmpfile=$(mktemp)
     register_temp_file "$_st_tmpfile"
     printf '%s' "$result" > "$_st_tmpfile"
-    test_files_json=$(python3 -c '
-import json, re, sys
-
-text = open(sys.argv[1]).read()
-text = re.sub(r"^```\w*\s*\n", "", text)
-text = re.sub(r"\n```\s*$", "", text)
-text = text.strip()
-
-try:
-    arr = json.loads(text)
-    if isinstance(arr, list):
-        print(json.dumps(arr))
-        sys.exit(0)
-except Exception:
-    pass
-
-match = re.search(r"\[[\s\S]*?\]", text)
-if match:
-    try:
-        arr = json.loads(match.group(0))
-        print(json.dumps(arr))
-        sys.exit(0)
-    except Exception:
-        pass
-
-sys.exit(1)
-' "$_st_tmpfile" 2>/dev/null) || {
+    test_files_json=$(parse_llm_json_array "$_st_tmpfile" 2>/dev/null) || {
         rm -f "$_st_tmpfile"
         log_worker "Spec test generation: parse failed — skipping"
         return 0
@@ -1116,32 +1023,7 @@ Respond with ONLY a JSON object (no fences):
     _sr_tmpfile=$(mktemp)
     register_temp_file "$_sr_tmpfile"
     printf '%s' "$result" > "$_sr_tmpfile"
-    review_json=$(python3 -c '
-import json, re, sys
-
-text = open(sys.argv[1]).read()
-text = re.sub(r"^```\w*\s*\n", "", text)
-text = re.sub(r"\n```\s*$", "", text)
-text = text.strip()
-
-try:
-    obj = json.loads(text)
-    print(json.dumps(obj))
-    sys.exit(0)
-except Exception:
-    pass
-
-match = re.search(r"\{[\s\S]*\"verdict\"[\s\S]*\}", text)
-if match:
-    try:
-        obj = json.loads(match.group(0))
-        print(json.dumps(obj))
-        sys.exit(0)
-    except Exception:
-        pass
-
-sys.exit(1)
-' "$_sr_tmpfile" 2>/dev/null) || {
+    review_json=$(parse_llm_json_object "$_sr_tmpfile" "verdict" 2>/dev/null) || {
         rm -f "$_sr_tmpfile"
         log_worker "Spec review: parse failed — defaulting to pass"
         echo '{"verdict":"pass","confidence":0,"gaps":[]}'
@@ -1203,32 +1085,7 @@ Respond with ONLY a JSON object (no fences):
     _ac_tmpfile=$(mktemp)
     register_temp_file "$_ac_tmpfile"
     printf '%s' "$result" > "$_ac_tmpfile"
-    acc_json=$(python3 -c '
-import json, re, sys
-
-text = open(sys.argv[1]).read()
-text = re.sub(r"^```\w*\s*\n", "", text)
-text = re.sub(r"\n```\s*$", "", text)
-text = text.strip()
-
-try:
-    obj = json.loads(text)
-    print(json.dumps(obj))
-    sys.exit(0)
-except Exception:
-    pass
-
-match = re.search(r"\{[\s\S]*\"all_satisfied\"[\s\S]*\}", text)
-if match:
-    try:
-        obj = json.loads(match.group(0))
-        print(json.dumps(obj))
-        sys.exit(0)
-    except Exception:
-        pass
-
-sys.exit(1)
-' "$_ac_tmpfile" 2>/dev/null) || {
+    acc_json=$(parse_llm_json_object "$_ac_tmpfile" "all_satisfied" 2>/dev/null) || {
         rm -f "$_ac_tmpfile"
         log_worker "Acceptance check: parse failed — defaulting to pass"
         echo '{"all_satisfied":true,"scenarios":[]}'
@@ -1292,32 +1149,7 @@ Respond with ONLY a JSON object (no fences):
     _dr_tmpfile=$(mktemp)
     register_temp_file "$_dr_tmpfile"
     printf '%s' "$result" > "$_dr_tmpfile"
-    diff_json=$(python3 -c '
-import json, re, sys
-
-text = open(sys.argv[1]).read()
-text = re.sub(r"^```\w*\s*\n", "", text)
-text = re.sub(r"\n```\s*$", "", text)
-text = text.strip()
-
-try:
-    obj = json.loads(text)
-    print(json.dumps(obj))
-    sys.exit(0)
-except Exception:
-    pass
-
-match = re.search(r"\{[\s\S]*\"confidence\"[\s\S]*\}", text)
-if match:
-    try:
-        obj = json.loads(match.group(0))
-        print(json.dumps(obj))
-        sys.exit(0)
-    except Exception:
-        pass
-
-sys.exit(1)
-' "$_dr_tmpfile" 2>/dev/null) || {
+    diff_json=$(parse_llm_json_object "$_dr_tmpfile" "confidence" 2>/dev/null) || {
         rm -f "$_dr_tmpfile"
         log_worker "Diff review: parse failed — defaulting to 50"
         echo "50"
@@ -1390,33 +1222,7 @@ print(json.dumps(messages))
     _rr_tmpfile=$(mktemp)
     register_temp_file "$_rr_tmpfile"
     printf '%s' "$repair_output" > "$_rr_tmpfile"
-    patches=$(python3 -c '
-import json, re, sys
-
-text = open(sys.argv[1]).read()
-text = re.sub(r"^```\w*\s*\n", "", text)
-text = re.sub(r"\n```\s*$", "", text)
-text = text.strip()
-
-try:
-    arr = json.loads(text)
-    if isinstance(arr, list):
-        print(json.dumps(arr))
-        sys.exit(0)
-except Exception:
-    pass
-
-match = re.search(r"\[[\s\S]*?\]", text)
-if match:
-    try:
-        arr = json.loads(match.group(0))
-        print(json.dumps(arr))
-        sys.exit(0)
-    except Exception:
-        pass
-
-sys.exit(1)
-' "$_rr_tmpfile" 2>/dev/null) || {
+    patches=$(parse_llm_json_array "$_rr_tmpfile" 2>/dev/null) || {
         rm -f "$_rr_tmpfile"
         log_worker "Refinement repair: parse failed"
         return 1
