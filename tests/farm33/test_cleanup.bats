@@ -4,13 +4,13 @@ setup() {
     load '../test_helper/setup'
     load_farm33_helpers
     # Reset temp file tracking for each test
-    _FARM33_TEMP_FILES=()
+    _COMMON_TEMP_FILES=()
 }
 
 @test "register_temp_file: adds file to tracking array" {
     register_temp_file "/tmp/farm_test_1"
     register_temp_file "/tmp/farm_test_2"
-    assert_equal "${#_FARM33_TEMP_FILES[@]}" "2"
+    assert_equal "${#_COMMON_TEMP_FILES[@]}" "2"
 }
 
 @test "safe_cleanup: removes tracked files" {

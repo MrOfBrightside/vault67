@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Shared helpers
+COPY lib/ lib/
+
 # vault67
 COPY vault67/vault67 vault67/vault67-watch vault67/
 COPY vault67/lib/ vault67/lib/

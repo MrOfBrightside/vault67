@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # vault67 helper functions — extracted for testability
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Source shared helpers (colors, temp file tracking, cleanup)
+_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../../lib/common.bash
+source "${_HELPERS_DIR}/../../../lib/common.bash" 2>/dev/null \
+    || source "${_HELPERS_DIR}/../../lib/common.bash" 2>/dev/null \
+    || {
+    # Fallback: define locally if common.bash not found (e.g., in Docker)
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'; NC='\033[0m'
+    _COMMON_TEMP_FILES=()
+    register_temp_file() { _COMMON_TEMP_FILES+=("$1"); }
+    safe_cleanup() {
+        local f; for f in "${_COMMON_TEMP_FILES[@]+"${_COMMON_TEMP_FILES[@]}"}"; do
+            [ -d "$f" ] && rm -rf "$f" 2>/dev/null || rm -f "$f" 2>/dev/null || true
+        done
+    }
+}
 
 error() {
     echo -e "${RED}Error: $*${NC}" >&2
@@ -203,22 +214,4 @@ else:
         if s and any(s.startswith(kw) for kw in ['Feature:', 'Scenario:', 'Given ', 'When ', 'Then ', 'And ', 'But ']):
             print(line)
 " 2>/dev/null
-}
-
-# Temp file tracking for safe cleanup
-_VAULT67_TEMP_FILES=()
-
-register_temp_file() {
-    _VAULT67_TEMP_FILES+=("$1")
-}
-
-safe_cleanup() {
-    local f
-    for f in "${_VAULT67_TEMP_FILES[@]+"${_VAULT67_TEMP_FILES[@]}"}"; do
-        if [ -d "$f" ]; then
-            rm -rf "$f" 2>/dev/null || true
-        elif [ -f "$f" ]; then
-            rm -f "$f" 2>/dev/null || true
-        fi
-    done
 }

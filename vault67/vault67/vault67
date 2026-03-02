@@ -57,7 +57,8 @@ api_request() {
     local data="${3:-}"
     
     local url="${FORGEJO_API}${endpoint}"
-    local response_file=$(mktemp)
+    local response_file
+    response_file=$(mktemp)
     register_temp_file "$response_file"
     local http_code
     
@@ -94,7 +95,8 @@ api_create_issue() {
     local body="$2"
     
     local owner_repo="${FORGEJO_REPO}"
-    local json_data=$(python3 -c "import json, sys; print(json.dumps({'title': sys.argv[1], 'body': sys.argv[2]}))" "$title" "$body")
+    local json_data
+    json_data=$(python3 -c "import json, sys; print(json.dumps({'title': sys.argv[1], 'body': sys.argv[2]}))" "$title" "$body")
     
     api_request "POST" "/repos/${owner_repo}/issues" "$json_data"
 }
@@ -140,7 +142,8 @@ api_add_label() {
     local label_name="$2"
     local owner_repo="${FORGEJO_REPO}"
     
-    local json_data=$(python3 -c "import json, sys; print(json.dumps({'labels': [int(sys.argv[1])] if sys.argv[1].isdigit() else [sys.argv[1]]}))" "$label_name")
+    local json_data
+    json_data=$(python3 -c "import json, sys; print(json.dumps({'labels': [int(sys.argv[1])] if sys.argv[1].isdigit() else [sys.argv[1]]}))" "$label_name")
     
     api_request "POST" "/repos/${owner_repo}/issues/${issue_number}/labels" "$json_data"
 }
@@ -152,7 +155,8 @@ api_replace_labels() {
     local label_name="$2"
     local owner_repo="${FORGEJO_REPO}"
     
-    local json_data=$(python3 -c "import json, sys; print(json.dumps({'labels': [sys.argv[1]]}))" "$label_name")
+    local json_data
+    json_data=$(python3 -c "import json, sys; print(json.dumps({'labels': [sys.argv[1]]}))" "$label_name")
     
     api_request "PUT" "/repos/${owner_repo}/issues/${issue_number}/labels" "$json_data"
 }
@@ -174,7 +178,8 @@ api_add_comment() {
     local comment_body="$2"
     local owner_repo="${FORGEJO_REPO}"
     
-    local json_data=$(python3 -c "import json, sys; print(json.dumps({'body': sys.argv[1]}))" "$comment_body")
+    local json_data
+    json_data=$(python3 -c "import json, sys; print(json.dumps({'body': sys.argv[1]}))" "$comment_body")
     
     api_request "POST" "/repos/${owner_repo}/issues/${issue_number}/comments" "$json_data"
 }
@@ -202,10 +207,13 @@ _dep_repo()  { echo "${FORGEJO_REPO##*/}"; }
 api_add_dependency() {
     local issue_number="$1"
     local depends_on_number="$2"
-    local owner=$(_dep_owner)
-    local repo=$(_dep_repo)
+    local owner
+    owner=$(_dep_owner)
+    local repo
+    repo=$(_dep_repo)
 
-    local json_data=$(python3 -c "
+    local json_data
+    json_data=$(python3 -c "
 import json, sys
 print(json.dumps({'index': int(sys.argv[1]), 'owner': sys.argv[2], 'repo': sys.argv[3]}))
 " "$depends_on_number" "$owner" "$repo")
@@ -234,10 +242,13 @@ api_get_blocks() {
 api_remove_dependency() {
     local issue_number="$1"
     local depends_on_number="$2"
-    local owner=$(_dep_owner)
-    local repo=$(_dep_repo)
+    local owner
+    owner=$(_dep_owner)
+    local repo
+    repo=$(_dep_repo)
 
-    local json_data=$(python3 -c "
+    local json_data
+    json_data=$(python3 -c "
 import json, sys
 print(json.dumps({'index': int(sys.argv[1]), 'owner': sys.argv[2], 'repo': sys.argv[3]}))
 " "$depends_on_number" "$owner" "$repo")
@@ -284,7 +295,8 @@ generate_ticket_id() {
     if [ -d "$TICKETS_DIR" ]; then
         for dir in "$TICKETS_DIR"/TCK-*; do
             if [ -d "$dir" ]; then
-                local id=$(basename "$dir" | sed 's/TCK-//')
+                local id
+                id=$(basename "$dir" | sed 's/TCK-//')
                 if [ "$id" -gt "$max_id" ]; then
                     max_id=$id
                 fi
@@ -328,7 +340,8 @@ cmd_create() {
     # Ensure API config is loaded
     require_api_config
 
-    local timestamp=$(date -u +"%Y-%m-%d")
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%d")
 
     info "Creating issue on Forgejo..."
     info "Title: $title"
@@ -420,8 +433,10 @@ Feature: <feature name>
 - [ ] No blocking questions remain"
 
     # Create issue via API
-    local api_response=$(api_create_issue "$title" "$issue_body")
-    local issue_number=$(echo "$api_response" | extract_issue_number)
+    local api_response
+    api_response=$(api_create_issue "$title" "$issue_body")
+    local issue_number
+    issue_number=$(echo "$api_response" | extract_issue_number)
     local issue_url="https://git.logikfabriken.se/${FORGEJO_REPO}/issues/${issue_number}"
 
     success "Created issue #${issue_number}"
@@ -447,7 +462,8 @@ Feature: <feature name>
 update_ticket_state() {
     local ticket_file="$1"
     local new_state="$2"
-    local timestamp=$(date -u +"%Y-%m-%d")
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%d")
 
     [ ! -f "$ticket_file" ] && error "Ticket file not found: $ticket_file"
 
@@ -463,7 +479,8 @@ bump_spec_version() {
     [ ! -f "$ticket_file" ] && error "Ticket file not found: $ticket_file"
 
     # Extract current version
-    local current_version=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^spec_version:' | awk '{print $2}')
+    local current_version
+    current_version=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^spec_version:' | awk '{print $2}')
     local new_version=$((current_version + 1))
 
     # Update spec_version
@@ -485,7 +502,8 @@ _judge_add_question() {
     local next_num=$(( _qcount + 1 ))
 
     # Insert before ## Notes line
-    local temp_qfile=$(mktemp)
+    local temp_qfile
+    temp_qfile=$(mktemp)
     register_temp_file "$temp_qfile"
     awk -v num="$next_num" -v q="$question" '
         /^## Notes/ {
@@ -509,16 +527,21 @@ judge_agent() {
     local dor_results=()
 
     # Extract content from spec.md
-    local spec_content=$(cat "$spec_file")
+    local spec_content
+    spec_content=$(cat "$spec_file")
 
     # Extract key fields for multi-check use
-    local context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
-    local goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
-    local requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
+    local context
+    context=$(echo "$spec_content" | sed -n '/^## Context$/,/^## /p' | sed '1d;$d')
+    local goal
+    goal=$(echo "$spec_content" | sed -n '/^## Goal$/,/^## /p' | sed '1d;$d')
+    local requirements
+    requirements=$(echo "$spec_content" | sed -n '/^## Requirements/,/^## /p' | sed '1d;$d')
 
     # Check 1: Scope defined (in-scope required, out-of-scope is optional)
     local has_scope=false
-    local scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
+    local scope_in
+    scope_in=$(echo "$spec_content" | sed -n '/### In scope/,/### /p' | sed '1d;$d')
     if echo "$scope_in" | grep -q -e "^[-•*][[:space:]]*[^[:space:]]"; then
         has_scope=true
         dor_results+=("[x] Scope in/out defined")
@@ -532,7 +555,8 @@ judge_agent() {
     # Check 2: Gherkin scenarios present, testable, and not generic placeholders
     local has_gherkin=false
     local _gherkin_fail_reason=""
-    local gherkin_block=$(echo "$spec_content" | sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p')
+    local gherkin_block
+    gherkin_block=$(echo "$spec_content" | sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p')
     if echo "$gherkin_block" | grep -q "Feature:\s\+\w" && \
        echo "$gherkin_block" | grep -q "Scenario:\s\+\w" && \
        echo "$gherkin_block" | grep -q "Given\s\+\w" && \
@@ -543,7 +567,8 @@ judge_agent() {
             _gherkin_fail_reason="generic placeholders detected"
         fi
         # 2b: Require at least 2 scenarios (happy path + error/edge case)
-        local _scenario_count=$(echo "$gherkin_block" | grep -c "Scenario:")
+        local _scenario_count
+        _scenario_count=$(echo "$gherkin_block" | grep -c "Scenario:")
         if [ "$_scenario_count" -lt 2 ] && [ -z "$_gherkin_fail_reason" ]; then
             _gherkin_fail_reason="only $_scenario_count scenario (need at least 2)"
         fi
@@ -626,7 +651,8 @@ judge_agent() {
     local has_no_blocking_questions=true
     if [ -f "$questions_file" ]; then
         # Extract blocking questions section
-        local questions_section=$(sed -n '/## Blocking questions/,/## Notes/p' "$questions_file")
+        local questions_section
+        questions_section=$(sed -n '/## Blocking questions/,/## Notes/p' "$questions_file")
 
         # Check if there are actual questions with content (not just template placeholders)
         # Look for lines like "1) Question: something" or "Question: something" where something is not empty
@@ -653,10 +679,14 @@ judge_agent() {
     # Check 9: Cross-field duplicate detection
     local _dup_check_pass=true
     # Normalize: lowercase, strip list markers/whitespace, collapse
-    local _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_ctx
+    _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_goal
+    _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_req
+    _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_scope
+    _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     local _dup_count=0
     if [ -n "$_norm_ctx" ]; then
         [ "$_norm_ctx" = "$_norm_goal" ] && _dup_count=$((_dup_count + 1))
@@ -673,7 +703,8 @@ judge_agent() {
 
     # Check 10: Minimum substance threshold (at least 4 substantive lines across context+goal+requirements)
     local _substance_check_pass=true
-    local _substance_lines=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
+    local _substance_lines
+    _substance_lines=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
         grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification' | \
         grep -c '[[:alnum:]]')
     if [ "$_substance_lines" -lt 4 ]; then
@@ -685,7 +716,8 @@ judge_agent() {
     fi
 
     # Update Definition of Ready checklist in spec.md
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(mktemp)
     register_temp_file "$temp_file"
     local in_dor_section=false
     local dor_index=0
@@ -855,6 +887,7 @@ implementation_status_check() {
             loc=$(echo "$loc" | xargs)
             [ -z "$loc" ] && continue
             # Check if any file matching the pattern exists
+            # shellcheck disable=SC2086  # $loc is a glob pattern
             if [ -e "$repo_path/$loc" ] || ls "$repo_path"/$loc 2>/dev/null | head -1 | grep -q .; then
                 sig_test_files=1
                 break
@@ -912,22 +945,34 @@ generate_promptpack() {
     info "Generating promptpack.md..."
 
     # Extract values from ticket.md
-    local base_ref=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^base_ref:' | awk '{print $2}')
+    local base_ref
+    base_ref=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^base_ref:' | awk '{print $2}')
 
     # Extract sections from spec.md
-    local context=$(sed -n '/^## Context$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local goal=$(sed -n '/^## Goal$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local scope_in=$(sed -n '/^### In scope$/,/^###/p' "$spec_file" | sed '1d;$d')
-    local scope_out=$(sed -n '/^### Out of scope$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local gherkin=$(sed -n '/^## Acceptance Criteria (Gherkin)$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local architecture=$(sed -n '/^## Architecture alignment$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local code_structure=$(sed -n '/^## Code structure$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local security=$(sed -n '/^## Security and compliance$/,/^##/p' "$spec_file" | sed '1d;$d')
-    local test_strategy=$(sed -n '/^## Test strategy$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local context
+    context=$(sed -n '/^## Context$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local goal
+    goal=$(sed -n '/^## Goal$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local scope_in
+    scope_in=$(sed -n '/^### In scope$/,/^###/p' "$spec_file" | sed '1d;$d')
+    local scope_out
+    scope_out=$(sed -n '/^### Out of scope$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local gherkin
+    gherkin=$(sed -n '/^## Acceptance Criteria (Gherkin)$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local architecture
+    architecture=$(sed -n '/^## Architecture alignment$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local code_structure
+    code_structure=$(sed -n '/^## Code structure$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local security
+    security=$(sed -n '/^## Security and compliance$/,/^##/p' "$spec_file" | sed '1d;$d')
+    local test_strategy
+    test_strategy=$(sed -n '/^## Test strategy$/,/^##/p' "$spec_file" | sed '1d;$d')
 
     # Extract golden commands
-    local golden_build=$(echo "$test_strategy" | grep "- Golden build command:" | sed 's/- Golden build command:\s*//')
-    local golden_test=$(echo "$test_strategy" | grep "- Golden test command:" | sed 's/- Golden test command:\s*//')
+    local golden_build
+    golden_build=$(echo "$test_strategy" | grep "- Golden build command:" | sed 's/- Golden build command:\s*//')
+    local golden_test
+    golden_test=$(echo "$test_strategy" | grep "- Golden test command:" | sed 's/- Golden test command:\s*//')
 
     # Write promptpack.md
     cat > "$promptpack_file" <<EOF
@@ -1001,7 +1046,8 @@ architecture_compliance_agent() {
     info "Analyzing architecture alignment..."
 
     # Check if architecture section already has substantive content
-    local existing_arch=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    local existing_arch
+    existing_arch=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$existing_arch" | grep -q -e "- Detected stack:[[:space:]]*[^[:space:]]" || \
        echo "$existing_arch" | grep -q -e "- Relevant modules:[[:space:]]*[^[:space:]]"; then
         success "Architecture alignment section already filled in - preserving"
@@ -1015,7 +1061,8 @@ architecture_compliance_agent() {
     }
 
     # Get repo path
-    local repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
+    local repo_path
+    repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
 
     # --- Step 1: Detect language/stack from ## Language detection ---
     local detected_stack=""
@@ -1032,12 +1079,16 @@ architecture_compliance_agent() {
                     "#"*|"") continue ;;
                 esac
                 if [ "$in_lang" = true ] && [[ "$line" == -\ * ]]; then
-                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
-                    local rest=$(echo "$line" | cut -d: -f2-)
-                    local lang=$(echo "$rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    local marker
+                    marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    local rest
+                    rest=$(echo "$line" | cut -d: -f2-)
+                    local lang
+                    lang=$(echo "$rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                     # Handle glob patterns (e.g. *.csproj)
                     local _matched=false
                     if [[ "$marker" == *"*"* ]]; then
+                        # shellcheck disable=SC2086  # $marker is a glob pattern
                         ls "$repo_path"/$marker 1>/dev/null 2>&1 && _matched=true
                     elif [ -f "$repo_path/$marker" ]; then
                         _matched=true
@@ -1068,11 +1119,13 @@ architecture_compliance_agent() {
         local _dir_list=""
         for d in "$repo_path"/*/; do
             [ -d "$d" ] || continue
-            local dirname=$(basename "$d")
+            local dirname
+            dirname=$(basename "$d")
             # Skip hidden dirs and dirs in skip list
             [[ "$dirname" == .* ]] && continue
             [ -n "$_skip_dirs" ] && echo "$_skip_dirs" | grep -q "|${dirname}|" && continue
-            local count=$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')
+            local count
+            count=$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')
             _dir_list="${_dir_list:+$_dir_list, }${dirname}/ (${count} items)"
         done
         repo_structure="$_dir_list"
@@ -1083,14 +1136,17 @@ architecture_compliance_agent() {
 
     # --- Step 3: Map Gherkin keywords to actual directories ---
     local relevant_dirs=""
-    local gherkin_section=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
-    local scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then" 2>/dev/null)
+    local gherkin_section
+    gherkin_section=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
+    local scenarios
+    scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then" 2>/dev/null)
 
     if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null && [ -n "$scenarios" ]; then
         # Build stop word regex from ## Stop words
         local _stop_re="^(given|when|then|that|this|from|with)$"
         if [ -f "$default_rules" ]; then
-            local _stop_words=$(_read_md_section "Stop words" "$default_rules" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | paste -sd'|' -)
+            local _stop_words
+            _stop_words=$(_read_md_section "Stop words" "$default_rules" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | paste -sd'|' -)
             [ -n "$_stop_words" ] && _stop_re="^(${_stop_words})$"
         fi
 
@@ -1103,17 +1159,20 @@ architecture_compliance_agent() {
         fi
 
         # Extract nouns/verbs from scenarios for matching
-        local scenario_words=$(echo "$scenarios" | tr '[:upper:]' '[:lower:]' | \
+        local scenario_words
+        scenario_words=$(echo "$scenarios" | tr '[:upper:]' '[:lower:]' | \
             sed 's/[^a-z ]/ /g' | tr ' ' '\n' | sort -u | \
             awk 'length >= 4' | grep -vE "$_stop_re")
 
         # Find directories containing files whose names match scenario keywords
         for word in $scenario_words; do
-            local matches=$(eval "find \"$repo_path\" -maxdepth 3 -type f \
+            local matches
+            matches=$(eval "find \"$repo_path\" -maxdepth 3 -type f \
                 \\( -name \"*${word}*\" -o -name \"*$(echo "$word" | sed 's/s$//')*\" \\) \
                 $_find_excludes" 2>/dev/null | head -5)
             if [ -n "$matches" ]; then
-                local dirs=$(echo "$matches" | while read -r f; do
+                local dirs
+                dirs=$(echo "$matches" | while read -r f; do
                     dirname "$f" | sed "s|^${repo_path}/||"
                 done | sort -u)
                 for d in $dirs; do
@@ -1143,7 +1202,8 @@ architecture_compliance_agent() {
     if [ -n "$repo_config" ]; then
         info "Found project config: ${repo_config}"
         project_constraints=$(_read_md_section "Constraints" "$repo_config")
-        local proj_forbidden=$(_read_md_section "Forbidden paths" "$repo_config")
+        local proj_forbidden
+        proj_forbidden=$(_read_md_section "Forbidden paths" "$repo_config")
         [ -n "$proj_forbidden" ] && project_forbidden="$proj_forbidden"
         project_notes=$(_read_md_section "Notes" "$repo_config")
     fi
@@ -1154,7 +1214,8 @@ architecture_compliance_agent() {
     fi
 
     # --- Step 5: Build output ---
-    local temp_arch=$(mktemp)
+    local temp_arch
+    temp_arch=$(mktemp)
     register_temp_file "$temp_arch"
     {
         echo "## Architecture alignment"
@@ -1214,7 +1275,8 @@ lead_developer_agent() {
     info "Analyzing code structure..."
 
     # Check if code structure section already has substantive content
-    local existing_cs=$(sed -n '/^## Code structure/,/^## /p' "$spec_file" | sed '1d;$d')
+    local existing_cs
+    existing_cs=$(sed -n '/^## Code structure/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$existing_cs" | grep -q -e "- Module pattern:[[:space:]]*[^[:space:]]"; then
         success "Code structure section already filled in - preserving"
         return 0
@@ -1227,17 +1289,21 @@ lead_developer_agent() {
     }
 
     # Get repo path
-    local repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
+    local repo_path
+    repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
 
     # --- Step 1: Get detected stack from architecture section ---
-    local arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
-    local detected_stack=$(echo "$arch_section" | grep "^- Detected stack:" | sed 's/^- Detected stack:[[:space:]]*//')
+    local arch_section
+    arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    local detected_stack
+    detected_stack=$(echo "$arch_section" | grep "^- Detected stack:" | sed 's/^- Detected stack:[[:space:]]*//')
 
     # --- Step 2: Detect monolith files ---
     local monolith_warnings=""
     local monolith_threshold=500
     if [ -f "$rules_file" ]; then
-        local _thresh=$(_read_ld_section "Monolith detection" "$rules_file" | grep "threshold:" | sed 's/.*threshold:[[:space:]]*//')
+        local _thresh
+        _thresh=$(_read_ld_section "Monolith detection" "$rules_file" | grep "threshold:" | sed 's/.*threshold:[[:space:]]*//')
         [ -n "$_thresh" ] && monolith_threshold="$_thresh"
     fi
 
@@ -1245,9 +1311,11 @@ lead_developer_agent() {
         # Find source files exceeding threshold (skip hidden dirs, node_modules, vendor, etc.)
         while IFS= read -r f; do
             [ -z "$f" ] && continue
-            local lc=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+            local lc
+            lc=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
             if [ "$lc" -gt "$monolith_threshold" ] 2>/dev/null; then
-                local relpath=$(echo "$f" | sed "s|^${repo_path}/||")
+                local relpath
+                relpath=$(echo "$f" | sed "s|^${repo_path}/||")
                 monolith_warnings="${monolith_warnings}${monolith_warnings:+; }${relpath} (${lc} lines)"
             fi
         done < <(find "$repo_path" -maxdepth 3 -type f \
@@ -1274,7 +1342,8 @@ lead_developer_agent() {
                 "#"*|"") continue ;;
             esac
             if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
-                local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                local marker
+                marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
                 if [ -f "$repo_path/$marker" ]; then
                     matched_marker="$marker"
                     module_pattern=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
@@ -1293,7 +1362,8 @@ lead_developer_agent() {
                     "#"*|"") continue ;;
                 esac
                 if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
-                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    local marker
+                    marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
                     if [ "$marker" = "$matched_marker" ]; then
                         file_naming=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
                         break
@@ -1310,7 +1380,8 @@ lead_developer_agent() {
                     "#"*|"") continue ;;
                 esac
                 if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
-                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    local marker
+                    marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
                     if [ "$marker" = "$matched_marker" ]; then
                         import_rules=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
                         break
@@ -1327,7 +1398,8 @@ lead_developer_agent() {
                     "#"*|"") continue ;;
                 esac
                 if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
-                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    local marker
+                    marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
                     if [ "$marker" = "$matched_marker" ]; then
                         max_file_length=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
                         break
@@ -1355,7 +1427,8 @@ lead_developer_agent() {
     fi
 
     # --- Step 5: Build output ---
-    local temp_cs=$(mktemp)
+    local temp_cs
+    temp_cs=$(mktemp)
     register_temp_file "$temp_cs"
     {
         echo "## Code structure"
@@ -1439,20 +1512,23 @@ security_compliance_agent() {
     info "Analyzing security and compliance requirements..."
 
     # Check if security section already has substantive content
-    local existing_sec=$(sed -n '/^## Security and compliance/,/^## /p' "$spec_file" | sed '1d;$d')
+    local existing_sec
+    existing_sec=$(sed -n '/^## Security and compliance/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$existing_sec" | grep -q -e "- Data classification:[[:space:]]*[^[:space:]]"; then
         success "Security and compliance section already filled in - preserving"
         return 0
     fi
 
-    local gherkin_section=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
+    local gherkin_section
+    gherkin_section=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
     if ! echo "$gherkin_section" | grep -q "Feature:"; then
         warn "No Gherkin scenarios found - skipping security analysis"
         return 1
     fi
 
     info "Analyzing scenarios for security implications..."
-    local scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then")
+    local scenarios
+    scenarios=$(echo "$gherkin_section" | grep -E "Scenario:|Given|When|Then")
 
     # Helper: first-match keyword rule from a section in the rules file
     _match_rule() {
@@ -1470,8 +1546,10 @@ security_compliance_agent() {
                 "#"*|"") continue ;;
             esac
             if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
-                local keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr ',' '|' | tr -d ' ' | tr '_' '.')
-                local value=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+                local keywords
+                keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr ',' '|' | tr -d ' ' | tr '_' '.')
+                local value
+                value=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
                 if [ "$field_num" -gt 1 ]; then
                     value=$(echo "$value" | cut -d'|' -f"$field_num" | sed 's/^[[:space:]]*//')
                 else
@@ -1502,8 +1580,10 @@ security_compliance_agent() {
                 "#"*|"") continue ;;
             esac
             if [ "$in_section" = true ] && [[ "$line" == -\ * ]]; then
-                local keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr ',' '|' | tr -d ' ' | tr '_' '.')
-                local value=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+                local keywords
+                keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr ',' '|' | tr -d ' ' | tr '_' '.')
+                local value
+                value=$(echo "$line" | cut -d: -f2- | sed 's/^[[:space:]]*//')
                 if echo "$scenarios" | grep -qiE "$keywords"; then
                     result="${result}${result:+; }${value}"
                 fi
@@ -1512,14 +1592,19 @@ security_compliance_agent() {
         echo "$result"
     }
 
-    local data_classification=$(_match_rule "Data classification rules" "Default classification" 1)
-    local pii_secrets=$(_match_rule "Data classification rules" "Default PII" 2)
-    local authn_authz=$(_match_rule "AuthN/AuthZ rules" "Default AuthN/AuthZ" 1)
-    local logging_audit=$(_match_rule "Logging rules" "Default logging" 1)
+    local data_classification
+    data_classification=$(_match_rule "Data classification rules" "Default classification" 1)
+    local pii_secrets
+    pii_secrets=$(_match_rule "Data classification rules" "Default PII" 2)
+    local authn_authz
+    authn_authz=$(_match_rule "AuthN/AuthZ rules" "Default AuthN/AuthZ" 1)
+    local logging_audit
+    logging_audit=$(_match_rule "Logging rules" "Default logging" 1)
 
     local base_constraints=""
     [ -f "$rules_file" ] && base_constraints=$(awk '/^## Base security constraints$/{found=1;next} /^## /{if(found)exit} found&&NF{printf "%s",$0}' "$rules_file")
-    local extra=$(_collect_constraints)
+    local extra
+    extra=$(_collect_constraints)
     local security_constraints="${base_constraints:-Follow secure coding practices}${extra:+; $extra}"
 
     # Defaults if rules file missing
@@ -1529,7 +1614,8 @@ security_compliance_agent() {
     [ -z "$logging_audit" ] && logging_audit="Standard application logging"
 
     # Update spec.md
-    local temp_section=$(mktemp)
+    local temp_section
+    temp_section=$(mktemp)
     register_temp_file "$temp_section"
     cat > "$temp_section" <<EOF
 - Data classification: $data_classification
@@ -1567,7 +1653,8 @@ EOF
 # Returns: response text on stdout, non-zero exit on failure
 ollama_generate() {
     local prompt="$1"
-    local response_file=$(mktemp)
+    local response_file
+    response_file=$(mktemp)
     register_temp_file "$response_file"
 
     # Build JSON payload using python3 for safe escaping
@@ -1656,22 +1743,32 @@ spec_enrichment_agent() {
     info "Running Spec Enrichment Agent..."
 
     # Extract core fields
-    local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-    local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
-    local requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
-    local scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
-    local title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
+    local context
+    context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local goal
+    goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local requirements
+    requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
+    local scope_in
+    scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
+    local title
+    title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
 
     # Count substantive lines (reuse judge's logic)
-    local _enrich_substance=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
+    local _enrich_substance
+    _enrich_substance=$(printf '%s\n%s\n%s' "$context" "$goal" "$requirements" | \
         grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|^Why is this needed|^What must be true|^What problem|TODO|TBD|to be determined|to be defined|needs clarification|Part of project:|Project scope:' | \
         grep -c '[[:alnum:]]')
 
     # Check for cross-field duplication
-    local _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_ctx
+    _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_goal
+    _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_req
+    _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_scope
+    _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     local _enrich_dup=0
     if [ -n "$_norm_ctx" ]; then
         [ "$_norm_ctx" = "$_norm_goal" ] && _enrich_dup=$((_enrich_dup + 1))
@@ -1751,13 +1848,18 @@ IN_SCOPE:
     fi
 
     # Parse LLM response
-    local new_context=$(echo "$llm_response" | sed -n '/^CONTEXT:/,/^GOAL:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
-    local new_goal=$(echo "$llm_response" | sed -n '/^GOAL:/,/^REQUIREMENTS:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
-    local new_requirements=$(echo "$llm_response" | sed -n '/^REQUIREMENTS:/,/^IN_SCOPE:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
-    local new_scope_in=$(echo "$llm_response" | sed -n '/^IN_SCOPE:/,$p' | sed '1d' | sed '/^[[:space:]]*$/d')
+    local new_context
+    new_context=$(echo "$llm_response" | sed -n '/^CONTEXT:/,/^GOAL:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
+    local new_goal
+    new_goal=$(echo "$llm_response" | sed -n '/^GOAL:/,/^REQUIREMENTS:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
+    local new_requirements
+    new_requirements=$(echo "$llm_response" | sed -n '/^REQUIREMENTS:/,/^IN_SCOPE:/p' | sed '1d;$d' | sed '/^[[:space:]]*$/d')
+    local new_scope_in
+    new_scope_in=$(echo "$llm_response" | sed -n '/^IN_SCOPE:/,$p' | sed '1d' | sed '/^[[:space:]]*$/d')
 
     # Validate expansion actually added substance
-    local _new_substance=$(printf '%s\n%s\n%s' "$new_context" "$new_goal" "$new_requirements" | \
+    local _new_substance
+    _new_substance=$(printf '%s\n%s\n%s' "$new_context" "$new_goal" "$new_requirements" | \
         grep -viE '^[[:space:]]*$|^[[:space:]]*-[[:space:]]*$|TODO|TBD|to be determined' | \
         grep -c '[[:alnum:]]')
 
@@ -1768,8 +1870,10 @@ IN_SCOPE:
     fi
 
     # Check expansion doesn't have duplicates
-    local _new_norm_ctx=$(echo "$new_context" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _new_norm_goal=$(echo "$new_goal" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _new_norm_ctx
+    _new_norm_ctx=$(echo "$new_context" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _new_norm_goal
+    _new_norm_goal=$(echo "$new_goal" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     if [ "$_new_norm_ctx" = "$_new_norm_goal" ]; then
         warn "LLM expansion produced duplicate fields — generating questions"
         _write_enrichment_questions "$title" "$context" "$questions_file"
@@ -1791,7 +1895,8 @@ IN_SCOPE:
     fi
     # Update In Scope
     if [ -n "$new_scope_in" ]; then
-        local temp_scope=$(mktemp)
+        local temp_scope
+        temp_scope=$(mktemp)
         register_temp_file "$temp_scope"
         printf '%s\n' "### In scope" "$new_scope_in" > "$temp_scope"
         awk -v replacement="$temp_scope" '
@@ -1852,7 +1957,8 @@ ba_translator_agent() {
     info "Running BA Translator Agent (LLM-powered)..."
 
     # Check if Gherkin already has substantive content (not placeholder)
-    local gherkin_block=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '1d;$d')
+    local gherkin_block
+    gherkin_block=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '1d;$d')
     if echo "$gherkin_block" | grep -q "Scenario:" && \
        ! is_placeholder_gherkin "$gherkin_block"; then
         success "Gherkin scenarios already contain substantive content - preserving"
@@ -1860,18 +1966,24 @@ ba_translator_agent() {
     fi
 
     # Extract key sections from spec.md for the prompt
-    local context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
-    local goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
-    local requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
-    local scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
-    local scope_out=$(sed -n '/^### Out of scope$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local context
+    context=$(sed -n '/^## Context$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local goal
+    goal=$(sed -n '/^## Goal$/,/^## /p' "$spec_file" | sed '1d;$d')
+    local requirements
+    requirements=$(sed -n '/^## Requirements/,/^## /p' "$spec_file" | sed '1d;$d')
+    local scope_in
+    scope_in=$(sed -n '/^### In scope$/,/^###\|^## /p' "$spec_file" | sed '1d;$d')
+    local scope_out
+    scope_out=$(sed -n '/^### Out of scope$/,/^## /p' "$spec_file" | sed '1d;$d')
 
     # Check if there's actually substance to translate — skip if all fields are
     # empty or only contain placeholder text (dashes, question prompts)
     local _has_substance=false
     for _field in "$context" "$goal" "$requirements" "$scope_in"; do
         # Strip placeholder lines: lone dashes, "Why is this needed?", "What must be true?", etc.
-        local _clean=$(echo "$_field" | grep -vE '^[[:space:]]*-?[[:space:]]*$|^[[:space:]]*$|^Why is|^What must|^What problem' | head -1)
+        local _clean
+        _clean=$(echo "$_field" | grep -vE '^[[:space:]]*-?[[:space:]]*$|^[[:space:]]*$|^Why is|^What must|^What problem' | head -1)
         if [ -n "$_clean" ]; then
             _has_substance=true
             break
@@ -1884,10 +1996,14 @@ ba_translator_agent() {
     fi
 
     # Check for duplicate fields — if context is copy-pasted everywhere, skip LLM call
-    local _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_ctx
+    _norm_ctx=$(echo "$context" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_goal
+    _norm_goal=$(echo "$goal" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_req
+    _norm_req=$(echo "$requirements" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local _norm_scope
+    _norm_scope=$(echo "$scope_in" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     local _ba_dup_count=0
     if [ -n "$_norm_ctx" ]; then
         [ "$_norm_ctx" = "$_norm_goal" ] && _ba_dup_count=$((_ba_dup_count + 1))
@@ -1901,7 +2017,8 @@ ba_translator_agent() {
     fi
 
     # Extract the feature title from existing Gherkin (if any)
-    local feature_title=$(echo "$gherkin_block" | grep "Feature:" | head -1 | sed 's/.*Feature:[[:space:]]*//')
+    local feature_title
+    feature_title=$(echo "$gherkin_block" | grep "Feature:" | head -1 | sed 's/.*Feature:[[:space:]]*//')
     # Fall back to issue title from spec metadata, then goal
     if [ -z "$feature_title" ]; then
         feature_title=$(grep -m1 "^# " "$spec_file" 2>/dev/null | sed 's/^# //')
@@ -1987,7 +2104,8 @@ If you are unsure about specific details, make reasonable assumptions based on t
     fi
 
     # Replace the Acceptance Criteria section in spec.md
-    local temp_gherkin=$(mktemp)
+    local temp_gherkin
+    temp_gherkin=$(mktemp)
     register_temp_file "$temp_gherkin"
     cat > "$temp_gherkin" <<GEOF
 ## Acceptance Criteria (Gherkin)
@@ -2024,8 +2142,10 @@ scan_repo() {
     info "Scanning repository..."
 
     # Extract repo path from ticket.md
-    local repo_path=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^repo:' | sed 's/^repo:[[:space:]]*//')
-    local base_ref=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^base_ref:' | sed 's/^base_ref:[[:space:]]*//')
+    local repo_path
+    repo_path=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^repo:' | sed 's/^repo:[[:space:]]*//')
+    local base_ref
+    base_ref=$(sed -n '/^---$/,/^---$/p' "$ticket_file" | grep '^base_ref:' | sed 's/^base_ref:[[:space:]]*//')
 
     [ -z "$repo_path" ] && error "No repo path found in ticket.md"
 
@@ -2201,14 +2321,17 @@ test_strategy_agent() {
     info "Running Test Strategy Agent (rule-based + LLM)..."
 
     # Check if test strategy already has substantive content (layers defined)
-    local existing_test=$(sed -n '/^## Test strategy/,/^## [^#]/p' "$spec_file" | sed '1d;$d')
+    local existing_test
+    existing_test=$(sed -n '/^## Test strategy/,/^## [^#]/p' "$spec_file" | sed '1d;$d')
     if echo "$existing_test" | grep -qE "^- (Unit|Integration|E2E|e2e) tests:"; then
         success "Test strategy already contains test layers - preserving"
         return 0
     fi
 
-    local gherkin=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
-    local scenario_count=$(echo "$gherkin" | grep -c "Scenario:" || true)
+    local gherkin
+    gherkin=$(sed -n '/## Acceptance Criteria (Gherkin)/,/^## /p' "$spec_file" | sed '$d')
+    local scenario_count
+    scenario_count=$(echo "$gherkin" | grep -c "Scenario:" || true)
 
     # --- Step 1: Determine golden commands (existing logic) ---
     local build_cmd="N/A (no compilation required)"
@@ -2216,13 +2339,16 @@ test_strategy_agent() {
     local detected_marker=""
 
     if [ -f "$rules_file" ]; then
-        local file_default_build=$(sed -n '/^## Default commands$/,/^## /p' "$rules_file" | grep "^- Golden build command:" | sed 's/^- Golden build command:[[:space:]]*//')
-        local file_default_test=$(sed -n '/^## Default commands$/,/^## /p' "$rules_file" | grep "^- Golden test command:" | sed 's/^- Golden test command:[[:space:]]*//')
+        local file_default_build
+        file_default_build=$(sed -n '/^## Default commands$/,/^## /p' "$rules_file" | grep "^- Golden build command:" | sed 's/^- Golden build command:[[:space:]]*//')
+        local file_default_test
+        file_default_test=$(sed -n '/^## Default commands$/,/^## /p' "$rules_file" | grep "^- Golden test command:" | sed 's/^- Golden test command:[[:space:]]*//')
         [ -n "$file_default_build" ] && build_cmd="$file_default_build"
         [ -n "$file_default_test" ] && test_cmd="$file_default_test"
 
         # Check language-specific rules against repo context
-        local repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
+        local repo_path
+        repo_path=$(grep "^- Path/URL:" "$repo_context_file" 2>/dev/null | sed 's/^- Path\/URL:[[:space:]]*//')
         if [ -n "$repo_path" ] && [ -d "$repo_path" ] 2>/dev/null; then
             local in_lang=false
             while IFS= read -r line; do
@@ -2232,8 +2358,10 @@ test_strategy_agent() {
                     "#"*|"") continue ;;
                 esac
                 if [ "$in_lang" = true ] && [[ "$line" == -\ * ]]; then
-                    local marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
-                    local cmds=$(echo "$line" | cut -d: -f2-)
+                    local marker
+                    marker=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                    local cmds
+                    cmds=$(echo "$line" | cut -d: -f2-)
                     if [ -f "$repo_path/$marker" ]; then
                         build_cmd=$(echo "$cmds" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                         test_cmd=$(echo "$cmds" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -2249,8 +2377,10 @@ test_strategy_agent() {
     local _has_frontend=false
 
     # Check 1: Architecture section in spec (already filled by arch agent)
-    local arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
-    local detected_stack_info=$(echo "$arch_section" | grep "^- \(Tech stack\|Detected stack\):" | sed 's/^- [^:]*:[[:space:]]*//')
+    local arch_section
+    arch_section=$(sed -n '/^## Architecture alignment/,/^## /p' "$spec_file" | sed '1d;$d')
+    local detected_stack_info
+    detected_stack_info=$(echo "$arch_section" | grep "^- \(Tech stack\|Detected stack\):" | sed 's/^- [^:]*:[[:space:]]*//')
 
     if echo "$detected_stack_info" | grep -qiE "React|Vue|Angular|Svelte|Next\.?js|Nuxt|frontend"; then
         _has_frontend=true
@@ -2284,11 +2414,16 @@ test_strategy_agent() {
             esac
             if [ "$in_layers" = true ] && [[ "$line" == -\ * ]]; then
                 # Parse: keywords: layer | framework | description
-                local keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
-                local rest=$(echo "$line" | cut -d: -f2-)
-                local layer=$(echo "$rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                local framework=$(echo "$rest" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                local description=$(echo "$rest" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                local keywords
+                keywords=$(echo "$line" | sed 's/^- //' | cut -d: -f1 | tr -d ' ')
+                local rest
+                rest=$(echo "$line" | cut -d: -f2-)
+                local layer
+                layer=$(echo "$rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                local framework
+                framework=$(echo "$rest" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                local description
+                description=$(echo "$rest" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
                 # Check if any keyword matches the Gherkin content
                 local IFS_SAVE="$IFS"
@@ -2342,7 +2477,8 @@ test_strategy_agent() {
     # Apply default test layer if nothing matched
     if [ -z "$layers_unit" ] && [ -z "$layers_integration" ] && [ -z "$layers_e2e" ]; then
         if [ -f "$rules_file" ]; then
-            local default_line=$(sed -n '/^## Default test layer$/,/^## /p' "$rules_file" | grep -v '^##' | grep -v '^$' | head -1)
+            local default_line
+            default_line=$(sed -n '/^## Default test layer$/,/^## /p' "$rules_file" | grep -v '^##' | grep -v '^$' | head -1)
             if [ -n "$default_line" ]; then
                 layers_unit=$(echo "$default_line" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                 layer_details_unit=$(echo "$default_line" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -2355,12 +2491,17 @@ test_strategy_agent() {
     local lint_cmd=""
     local typecheck_cmd=""
     if [ -f "$rules_file" ] && [ -n "$detected_marker" ]; then
-        local fw_line=$(sed -n '/^## Framework mapping$/,/^## /p' "$rules_file" | grep "^- ${detected_marker}:")
+        local fw_line
+        fw_line=$(sed -n '/^## Framework mapping$/,/^## /p' "$rules_file" | grep "^- ${detected_marker}:")
         if [ -n "$fw_line" ]; then
-            local fw_rest=$(echo "$fw_line" | cut -d: -f2-)
-            local fw_unit=$(echo "$fw_rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            local fw_integ=$(echo "$fw_rest" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            local fw_e2e=$(echo "$fw_rest" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            local fw_rest
+            fw_rest=$(echo "$fw_line" | cut -d: -f2-)
+            local fw_unit
+            fw_unit=$(echo "$fw_rest" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            local fw_integ
+            fw_integ=$(echo "$fw_rest" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            local fw_e2e
+            fw_e2e=$(echo "$fw_rest" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             lint_cmd=$(echo "$fw_rest" | cut -d'|' -f4 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             typecheck_cmd=$(echo "$fw_rest" | cut -d'|' -f5 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
@@ -2382,7 +2523,8 @@ test_strategy_agent() {
                 "#"*|"") continue ;;
             esac
             if [ "$in_qg" = true ] && [[ "$line" == -\ * ]]; then
-                local gate_text=$(echo "$line" | sed 's/^- //')
+                local gate_text
+                gate_text=$(echo "$line" | sed 's/^- //')
                 # Substitute lint/typecheck commands if we know them
                 if [ -n "$lint_cmd" ]; then
                     gate_text=$(echo "$gate_text" | sed "s/\`eslint\`\/\`ruff\`\/\`clippy\` depending on stack/\`${lint_cmd}\`/")
@@ -2423,7 +2565,8 @@ Do NOT assign e2e layer. Downgrade UI-related scenarios to integration or unit.
 "
         fi
 
-        local prompt="You are a test strategy advisor. Given these Gherkin scenarios and the detected test layers, map each scenario to a specific test layer, framework, and suggested file location.
+        local prompt
+        prompt="You are a test strategy advisor. Given these Gherkin scenarios and the detected test layers, map each scenario to a specific test layer, framework, and suggested file location.
 
 GHERKIN SCENARIOS:
 ${gherkin}
@@ -2473,13 +2616,15 @@ Rules:
             elif echo "$scenario_name" | grep -qiE "api|endpoint|route|login|auth|database|query|email|webhook|file|upload|download"; then
                 s_layer="integration"; s_fw="${layers_integration:-httpx/supertest}"; s_loc="tests/integration/"
             fi
-            local safe_name=$(echo "$scenario_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
+            local safe_name
+            safe_name=$(echo "$scenario_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
             scenario_table="${scenario_table}| ${scenario_name} | ${s_layer} | ${s_fw} | ${s_loc}${safe_name}.test | \n"
         done <<< "$scenario_names"
     fi
 
     # --- Step 7: Assemble and write to spec ---
-    local temp_test=$(mktemp)
+    local temp_test
+    temp_test=$(mktemp)
     register_temp_file "$temp_test"
     {
         echo "## Test strategy"
@@ -2547,9 +2692,12 @@ cmd_refine() {
     info "Fetching issue #${issue_number} from Forgejo..."
     
     # Get issue from API
-    local api_response=$(api_get_issue "$issue_number")
-    local issue_body=$(echo "$api_response" | extract_issue_body)
-    local current_labels=$(echo "$api_response" | extract_issue_labels)
+    local api_response
+    api_response=$(api_get_issue "$issue_number")
+    local issue_body
+    issue_body=$(echo "$api_response" | extract_issue_body)
+    local current_labels
+    current_labels=$(echo "$api_response" | extract_issue_labels)
     
     info "Current labels: ${current_labels}"
     
@@ -2565,7 +2713,8 @@ cmd_refine() {
     echo ""
 
     # Create temporary working directory
-    local temp_dir=$(mktemp -d)
+    local temp_dir
+    temp_dir=$(mktemp -d)
     register_temp_file "$temp_dir"
     local spec_file="$temp_dir/spec.md"
     local repo_context_file="$temp_dir/repo_context.md"
@@ -2575,8 +2724,10 @@ cmd_refine() {
     echo "$issue_body" > "$spec_file"
 
     # Create minimal repo_context.md (extract from spec metadata if present)
-    local repo_path=$(echo "$issue_body" | grep "^- Repo:" | sed 's/^- Repo: `\(.*\)`/\1/')
-    local base_ref=$(echo "$issue_body" | grep "^- Base ref:" | sed 's/^- Base ref: `\(.*\)`/\1/')
+    local repo_path
+    repo_path=$(echo "$issue_body" | grep "^- Repo:" | sed 's/^- Repo: `\(.*\)`/\1/')
+    local base_ref
+    base_ref=$(echo "$issue_body" | grep "^- Base ref:" | sed 's/^- Base ref: `\(.*\)`/\1/')
     
     cat > "$repo_context_file" <<REPO_EOF
 # Repo Context
@@ -2659,13 +2810,15 @@ QUES_EOF
     echo ""
 
     # Read updated spec back
-    local updated_spec=$(cat "$spec_file")
+    local updated_spec
+    updated_spec=$(cat "$spec_file")
 
     # Run Judge Agent (capture exit code without triggering set -e)
     local judge_result=0
     judge_agent "$spec_file" "$questions_file" || judge_result=$?
 
-    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     local new_label=""
     local comment_body=""
 
@@ -2673,7 +2826,8 @@ QUES_EOF
         # NEEDS_INFO - blocking questions exist
         new_label="state:NEEDS_INFO"
         
-        local questions_content=$(cat "$questions_file")
+        local questions_content
+        questions_content=$(cat "$questions_file")
         comment_body="## ⚠️ Blocking Questions
 
 The refinement pipeline identified blocking questions that need answers before proceeding:
@@ -2792,8 +2946,10 @@ cmd_answer() {
     info "Fetching issue #${issue_number} from Forgejo..."
     
     # Get issue from API
-    local api_response=$(api_get_issue "$issue_number")
-    local current_labels=$(echo "$api_response" | extract_issue_labels)
+    local api_response
+    api_response=$(api_get_issue "$issue_number")
+    local current_labels
+    current_labels=$(echo "$api_response" | extract_issue_labels)
     
     info "Current labels: ${current_labels}"
 
@@ -2806,7 +2962,8 @@ cmd_answer() {
 
     # Get comments to check if answers were provided
     info "Checking for answers in comments..."
-    local comments=$(api_get_comments "$issue_number")
+    local comments
+    comments=$(api_get_comments "$issue_number")
     
     # Simple check: if there are comments after the blocking questions comment, assume answers provided
     # (In a more sophisticated version, we could parse the comments to verify answers)
@@ -2877,9 +3034,12 @@ cmd_implement() {
     info "Fetching issue #${issue_number} from Forgejo..."
 
     # Get issue from API
-    local api_response=$(api_get_issue "$issue_number")
-    local issue_title=$(echo "$api_response" | python3 -c "import sys, json; print(json.load(sys.stdin)['title'])")
-    local current_labels=$(echo "$api_response" | extract_issue_labels)
+    local api_response
+    api_response=$(api_get_issue "$issue_number")
+    local issue_title
+    issue_title=$(echo "$api_response" | python3 -c "import sys, json; print(json.load(sys.stdin)['title'])")
+    local current_labels
+    current_labels=$(echo "$api_response" | extract_issue_labels)
 
     info "Current labels: ${current_labels}"
 
@@ -2933,7 +3093,8 @@ cmd_implement() {
 
     # Get comments to find the promptpack
     info "Fetching promptpack from comments..."
-    local comments=$(api_get_comments "$issue_number")
+    local comments
+    comments=$(api_get_comments "$issue_number")
     
     # Extract promptpack from the "Ready for Implementation" comment
     # (In a real implementation, we'd parse the JSON to find the specific comment)
@@ -2946,7 +3107,8 @@ cmd_implement() {
     echo ""
     
     # Add implementation status comment
-    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     local comment_body="## 🚧 Implementation Started
 
 Timestamp: ${timestamp}
@@ -3003,9 +3165,12 @@ cmd_delete() {
         error "Issue #${issue_number} not found"
     }
 
-    local issue_title=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
-    local issue_state=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])")
-    local labels=$(echo "$api_response" | extract_issue_labels)
+    local issue_title
+    issue_title=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
+    local issue_state
+    issue_state=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])")
+    local labels
+    labels=$(echo "$api_response" | extract_issue_labels)
 
     info "Issue #${issue_number}: ${issue_title}"
     info "State: ${labels} (${issue_state})"
@@ -3021,7 +3186,8 @@ cmd_delete() {
     fi
 
     # Close the issue and add a deletion comment
-    local json_data=$(python3 -c "import json; print(json.dumps({'state': 'closed'}))")
+    local json_data
+    json_data=$(python3 -c "import json; print(json.dumps({'state': 'closed'}))")
     api_request "PATCH" "/repos/${FORGEJO_REPO}/issues/${issue_number}" "$json_data" > /dev/null
 
     # Remove state labels and add DONE
@@ -3042,8 +3208,10 @@ _translate_project_issue() {
     local today="$4"
 
     # Extract project name and prompt from body
-    local project_name=$(echo "$raw_text" | grep "Created from project:" | sed 's/.*\*\*\(.*\)\*\*/\1/')
-    local project_prompt=$(echo "$raw_text" | sed -n 's/^> //p' | head -1)
+    local project_name
+    project_name=$(echo "$raw_text" | grep "Created from project:" | sed 's/.*\*\*\(.*\)\*\*/\1/')
+    local project_prompt
+    project_prompt=$(echo "$raw_text" | sed -n 's/^> //p' | head -1)
 
     local spec_body="# Specification
 
@@ -3151,9 +3319,12 @@ cmd_translate() {
     require_api_config
 
     info "Fetching issue #${issue_number}..."
-    local api_response=$(api_get_issue "$issue_number")
-    local issue_body=$(echo "$api_response" | extract_issue_body)
-    local issue_title=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
+    local api_response
+    api_response=$(api_get_issue "$issue_number")
+    local issue_body
+    issue_body=$(echo "$api_response" | extract_issue_body)
+    local issue_title
+    issue_title=$(echo "$api_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
 
     # Check if already has spec structure
     if echo "$issue_body" | grep -q "^# Specification"; then
@@ -3164,7 +3335,8 @@ cmd_translate() {
     info "Translating plain text to structured spec..."
 
     local raw_text="$issue_body"
-    local today=$(date -u +"%Y-%m-%d")
+    local today
+    today=$(date -u +"%Y-%m-%d")
 
     # Detect project-created issues — these have enough context to skip questions
     if echo "$raw_text" | grep -q "Created from project:"; then
@@ -3178,21 +3350,24 @@ cmd_translate() {
     local question_count=0
 
     # Check: can we identify concrete features/actions?
-    local action_lines=$(echo "$raw_text" | grep -ciE "create|add|implement|build|delete|update|list|show|display|send|import|export|connect|integrate" || true)
+    local action_lines
+    action_lines=$(echo "$raw_text" | grep -ciE "create|add|implement|build|delete|update|list|show|display|send|import|export|connect|integrate" || true)
     if [ "$action_lines" -lt 1 ]; then
         question_count=$((question_count + 1))
         questions="${questions}${question_count}) What specific actions/commands should this feature support?\n   Answer: \n\n"
     fi
 
     # Check: do we know who the user is?
-    local has_actor=$(echo "$raw_text" | grep -ciE "user|admin|developer|agent|daemon|system|cli" || true)
+    local has_actor
+    has_actor=$(echo "$raw_text" | grep -ciE "user|admin|developer|agent|daemon|system|cli" || true)
     if [ "$has_actor" -lt 1 ]; then
         question_count=$((question_count + 1))
         questions="${questions}${question_count}) Who is the primary user of this feature (human user, CLI, agent, daemon)?\n   Answer: \n\n"
     fi
 
     # Check: are there clear success criteria?
-    local has_outcome=$(echo "$raw_text" | grep -ciE "should|must|will|expect|result|output|return|display|produce" || true)
+    local has_outcome
+    has_outcome=$(echo "$raw_text" | grep -ciE "should|must|will|expect|result|output|return|display|produce" || true)
     if [ "$has_outcome" -lt 1 ]; then
         question_count=$((question_count + 1))
         questions="${questions}${question_count}) What does success look like? What should the output/result be?\n   Answer: \n\n"
@@ -3200,7 +3375,8 @@ cmd_translate() {
 
     # Check: are there external dependencies mentioned without specifics?
     if echo "$raw_text" | grep -qiE "api|integration|connect|external|service"; then
-        local has_api_detail=$(echo "$raw_text" | grep -ciE "endpoint|url|route|method|GET|POST|PUT|DELETE" || true)
+        local has_api_detail
+        has_api_detail=$(echo "$raw_text" | grep -ciE "endpoint|url|route|method|GET|POST|PUT|DELETE" || true)
         if [ "$has_api_detail" -lt 1 ]; then
             question_count=$((question_count + 1))
             questions="${questions}${question_count}) Which specific API endpoints or external services are involved?\n   Answer: \n\n"
@@ -3208,8 +3384,10 @@ cmd_translate() {
     fi
 
     # Check: is this a big feature that needs breakdown?
-    local word_count=$(echo "$raw_text" | wc -w | tr -d ' ')
-    local sentence_count=$(echo "$raw_text" | grep -c '\.' || true)
+    local word_count
+    word_count=$(echo "$raw_text" | wc -w | tr -d ' ')
+    local sentence_count
+    sentence_count=$(echo "$raw_text" | grep -c '\.' || true)
     if echo "$raw_text" | grep -qiE "break.?down|features|tasks|multiple|several|project|phases"; then
         question_count=$((question_count + 1))
         questions="${questions}${question_count}) This sounds like a large feature. Can you list the individual sub-features/tasks?\n   Answer: \n\n"
@@ -3220,12 +3398,14 @@ cmd_translate() {
     questions="${questions}${question_count}) What is explicitly out of scope for this feature?\n   Answer: \n\n"
 
     # Extract goal from text
-    local goal_lines=$(echo "$raw_text" | grep -iE "want|should|must|will|need" | head -3)
+    local goal_lines
+    goal_lines=$(echo "$raw_text" | grep -iE "want|should|must|will|need" | head -3)
     [ -z "$goal_lines" ] && goal_lines="$issue_title"
 
     # Extract scope hints
     local in_scope=""
-    local scope_lines=$(echo "$raw_text" | grep -iE "include|support|add|implement|create|build|break|use" | head -5)
+    local scope_lines
+    scope_lines=$(echo "$raw_text" | grep -iE "include|support|add|implement|create|build|break|use" | head -5)
     if [ -n "$scope_lines" ]; then
         while IFS= read -r line; do
             [ -z "$line" ] && continue
@@ -3237,7 +3417,8 @@ cmd_translate() {
     [ -z "$in_scope" ] && in_scope="- $issue_title"
 
     # Build spec with questions embedded
-    local spec_body="# Specification
+    local spec_body
+    spec_body="# Specification
 
 **Metadata:**
 - Repo: \`https://git.logikfabriken.se/${FORGEJO_REPO}.git\`
@@ -3295,7 +3476,8 @@ Feature: ${issue_title}
 
     # Post questions as a comment and set state to NEEDS_INFO
     if [ "$question_count" -gt 0 ]; then
-        local questions_comment="## Blocking Questions
+        local questions_comment
+        questions_comment="## Blocking Questions
 
 The following questions need answers before this ticket can be refined:
 
@@ -3362,13 +3544,16 @@ _project_create() {
     info "Creating project: $name"
 
     # Step 1: Create milestone
-    local milestone_json=$(python3 -c "
+    local milestone_json
+    milestone_json=$(python3 -c "
 import json, sys
 print(json.dumps({'title': sys.argv[1], 'description': sys.argv[2]}))
 " "$name" "$description")
 
-    local milestone_response=$(api_request "POST" "/repos/${FORGEJO_REPO}/milestones" "$milestone_json")
-    local milestone_id=$(echo "$milestone_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+    local milestone_response
+    milestone_response=$(api_request "POST" "/repos/${FORGEJO_REPO}/milestones" "$milestone_json")
+    local milestone_id
+    milestone_id=$(echo "$milestone_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
     success "Created milestone #${milestone_id}: $name"
 
     # Step 2: Break down description into features/tasks
@@ -3395,7 +3580,8 @@ print(json.dumps({'title': sys.argv[1], 'description': sys.argv[2]}))
 
         info "  Creating issue: $feature"
 
-        local issue_json=$(python3 -c "
+        local issue_json
+        issue_json=$(python3 -c "
 import json, sys
 print(json.dumps({
     'title': sys.argv[1],
@@ -3409,8 +3595,10 @@ Project prompt:
 
 This is feature/task extracted from the project breakdown." "$milestone_id")
 
-        local issue_response=$(api_request "POST" "/repos/${FORGEJO_REPO}/issues" "$issue_json")
-        local issue_num=$(echo "$issue_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['number'])")
+        local issue_response
+        issue_response=$(api_request "POST" "/repos/${FORGEJO_REPO}/issues" "$issue_json")
+        local issue_num
+        issue_num=$(echo "$issue_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['number'])")
 
         # Add state:NEW label so daemon picks it up
         api_replace_labels "$issue_num" "state:NEW" > /dev/null 2>&1 || true
@@ -3424,14 +3612,17 @@ This is feature/task extracted from the project breakdown." "$milestone_id")
     # Step 4: Detect and set dependencies between created issues
     if [ ${#created_issues[@]} -gt 1 ]; then
         info "Analyzing dependencies between features..."
-        local dep_json=$(_detect_feature_dependencies "${feature_texts[@]}")
+        local dep_json
+        dep_json=$(_detect_feature_dependencies "${feature_texts[@]}")
 
         # Parse dependency pairs and set them via API
         local dep_count=0
         while IFS= read -r dep_line; do
             [ -z "$dep_line" ] && continue
-            local dep_from=$(echo "$dep_line" | cut -d' ' -f1)  # feature index (0-based)
-            local dep_on=$(echo "$dep_line" | cut -d' ' -f2)    # depends-on index (0-based)
+            local dep_from
+            dep_from=$(echo "$dep_line" | cut -d' ' -f1)  # feature index (0-based)
+            local dep_on
+            dep_on=$(echo "$dep_line" | cut -d' ' -f2)    # depends-on index (0-based)
 
             local from_issue="${created_issues[$dep_from]}"
             local on_issue="${created_issues[$dep_on]}"
@@ -3496,8 +3687,10 @@ _project_run() {
     echo ""
 
     # Step 2: Get the milestone we just created (latest one with this name)
-    local milestones_response=$(api_request "GET" "/repos/${FORGEJO_REPO}/milestones?state=open&limit=10")
-    local milestone_id=$(echo "$milestones_response" | python3 -c "
+    local milestones_response
+    milestones_response=$(api_request "GET" "/repos/${FORGEJO_REPO}/milestones?state=open&limit=10")
+    local milestone_id
+    milestone_id=$(echo "$milestones_response" | python3 -c "
 import sys, json
 milestones = json.load(sys.stdin)
 for m in sorted(milestones, key=lambda x: x['id'], reverse=True):
@@ -3509,15 +3702,18 @@ for m in sorted(milestones, key=lambda x: x['id'], reverse=True):
     [ -z "$milestone_id" ] && error "Could not find milestone for project: $name"
 
     # Step 3: Get all issues in this milestone
-    local issues_response=$(api_request "GET" "/repos/${FORGEJO_REPO}/issues?milestones=${milestone_id}&state=open&type=issues&limit=50")
-    local all_issue_nums=$(echo "$issues_response" | python3 -c "
+    local issues_response
+    issues_response=$(api_request "GET" "/repos/${FORGEJO_REPO}/issues?milestones=${milestone_id}&state=open&type=issues&limit=50")
+    local all_issue_nums
+    all_issue_nums=$(echo "$issues_response" | python3 -c "
 import sys, json
 issues = json.load(sys.stdin)
 for i in sorted(issues, key=lambda x: x['number']):
     print(i['number'])
 " 2>/dev/null)
 
-    local total_issues=$(echo "$all_issue_nums" | wc -l | tr -d ' ')
+    local total_issues
+    total_issues=$(echo "$all_issue_nums" | wc -l | tr -d ' ')
     local processed=0
     local max_rounds=$((total_issues * 2))  # Safety limit
     local round=0
@@ -3532,8 +3728,10 @@ for i in sorted(issues, key=lambda x: x['number']):
 
         for issue_num in $all_issue_nums; do
             # Check if already processed (not state:NEW)
-            local issue_data=$(api_get_issue "$issue_num" 2>/dev/null) || continue
-            local labels=$(echo "$issue_data" | extract_issue_labels)
+            local issue_data
+            issue_data=$(api_get_issue "$issue_num" 2>/dev/null) || continue
+            local labels
+            labels=$(echo "$issue_data" | extract_issue_labels)
 
             # Skip if not in a processable state
             if ! echo "$labels" | grep -q "state:NEW"; then
@@ -3544,7 +3742,8 @@ for i in sorted(issues, key=lambda x: x['number']):
             local blockers
             blockers=$(api_check_deps_resolved "$issue_num" 2>/dev/null) || true
             if [ -n "$blockers" ]; then
-                local blocker_list=$(echo "$blockers" | tr '\n' ',' | sed 's/,$//')
+                local blocker_list
+                blocker_list=$(echo "$blockers" | tr '\n' ',' | sed 's/,$//')
                 info "  #${issue_num}: blocked by #${blocker_list} — skipping this round"
                 continue
             fi
@@ -3558,8 +3757,10 @@ for i in sorted(issues, key=lambda x: x['number']):
             "$SCRIPT_DIR/vault67" translate "$issue_num" 2>&1 | while IFS= read -r line; do echo "  $line"; done || true
 
             # Re-check state after translate (may have changed to NEEDS_INFO)
-            local post_translate=$(api_get_issue "$issue_num" 2>/dev/null)
-            local post_labels=$(echo "$post_translate" | extract_issue_labels)
+            local post_translate
+            post_translate=$(api_get_issue "$issue_num" 2>/dev/null)
+            local post_labels
+            post_labels=$(echo "$post_translate" | extract_issue_labels)
 
             if echo "$post_labels" | grep -q "state:NEEDS_INFO"; then
                 warn "  #${issue_num}: needs info after translate — skipping refine"
@@ -3604,7 +3805,8 @@ _project_list() {
         esac
     done
 
-    local response=$(api_request "GET" "/repos/${FORGEJO_REPO}/milestones?state=${state}&limit=50")
+    local response
+    response=$(api_request "GET" "/repos/${FORGEJO_REPO}/milestones?state=${state}&limit=50")
 
     python3 -c "
 import sys, json
@@ -3632,15 +3834,18 @@ _project_status() {
     [ -z "$milestone_id" ] && error "Usage: vault67 project status <milestone-id>"
 
     # Get milestone info
-    local milestone=$(api_request "GET" "/repos/${FORGEJO_REPO}/milestones/${milestone_id}")
-    local milestone_title=$(echo "$milestone" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
+    local milestone
+    milestone=$(api_request "GET" "/repos/${FORGEJO_REPO}/milestones/${milestone_id}")
+    local milestone_title
+    milestone_title=$(echo "$milestone" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
 
     echo ""
     echo "Project: $milestone_title"
     echo "=========================================="
 
     # Get all issues in this milestone (milestones= is the correct Forgejo filter)
-    local issues=$(api_request "GET" "/repos/${FORGEJO_REPO}/issues?milestones=${milestone_id}&state=all&type=issues&limit=50")
+    local issues
+    issues=$(api_request "GET" "/repos/${FORGEJO_REPO}/issues?milestones=${milestone_id}&state=all&type=issues&limit=50")
 
     # Build dependency map: issue_number -> [dep_numbers that are still open]
     local issue_numbers
@@ -3657,7 +3862,8 @@ for i in json.load(sys.stdin):
             local blockers
             blockers=$(api_check_deps_resolved "$inum" 2>/dev/null) || true
             if [ -n "$blockers" ]; then
-                local blocker_json=$(echo "$blockers" | python3 -c "import sys,json; print(json.dumps([int(l) for l in sys.stdin.read().strip().split()]))" 2>/dev/null)
+                local blocker_json
+                blocker_json=$(echo "$blockers" | python3 -c "import sys,json; print(json.dumps([int(l) for l in sys.stdin.read().strip().split()]))" 2>/dev/null)
                 dep_entries="${dep_entries}\"${inum}\": ${blocker_json}, "
             fi
         done
@@ -3886,11 +4092,13 @@ cmd_done() {
     api_replace_labels "$issue_number" "state:DONE" > /dev/null
 
     # Close the issue on Forgejo
-    local json_data=$(python3 -c "import json; print(json.dumps({'state': 'closed'}))")
+    local json_data
+    json_data=$(python3 -c "import json; print(json.dumps({'state': 'closed'}))")
     api_request "PATCH" "/repos/${FORGEJO_REPO}/issues/${issue_number}" "$json_data" > /dev/null
 
     # Add completion comment
-    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     api_add_comment "$issue_number" "Issue completed and closed at ${timestamp} via \`vault67 done\`" > /dev/null
 
     success "Issue #${issue_number} marked as DONE and closed"
@@ -3920,7 +4128,8 @@ for b in blocks:
             if [ -z "$still_blocked" ]; then
                 success "  #${blocked_num} — all dependencies resolved, ready for processing"
             else
-                local remaining=$(echo "$still_blocked" | tr '\n' ',' | sed 's/,$//')
+                local remaining
+                remaining=$(echo "$still_blocked" | tr '\n' ',' | sed 's/,$//')
                 info "  #${blocked_num} — still blocked by #${remaining}"
             fi
         done

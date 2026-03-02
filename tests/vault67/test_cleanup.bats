@@ -4,15 +4,15 @@ setup() {
     load '../test_helper/setup'
     load_vault67_helpers
     # Reset temp file tracking for each test
-    _VAULT67_TEMP_FILES=()
+    _COMMON_TEMP_FILES=()
 }
 
 @test "register_temp_file: adds file to tracking array" {
     register_temp_file "/tmp/test_file_1"
     register_temp_file "/tmp/test_file_2"
-    assert_equal "${#_VAULT67_TEMP_FILES[@]}" "2"
-    assert_equal "${_VAULT67_TEMP_FILES[0]}" "/tmp/test_file_1"
-    assert_equal "${_VAULT67_TEMP_FILES[1]}" "/tmp/test_file_2"
+    assert_equal "${#_COMMON_TEMP_FILES[@]}" "2"
+    assert_equal "${_COMMON_TEMP_FILES[0]}" "/tmp/test_file_1"
+    assert_equal "${_COMMON_TEMP_FILES[1]}" "/tmp/test_file_2"
 }
 
 @test "safe_cleanup: removes tracked files" {
