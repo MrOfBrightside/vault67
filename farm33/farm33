@@ -260,7 +260,7 @@ print(json.dumps({
     if [[ "$http_code" != "200" ]]; then
         if grep -q "model.*not found\|no such model" "$response_file" 2>/dev/null; then
             warn "Model '${OLLAMA_MODEL}' not found — pulling..."
-            if ollama pull "$OLLAMA_MODEL" 2>&1 | tail -1; then
+            if command -v ollama >/dev/null 2>&1 && ollama pull "$OLLAMA_MODEL" 2>&1 | tail -1; then
                 success "Model '${OLLAMA_MODEL}' pulled"
                 rm -f "$response_file"
                 http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$OLLAMA_TIMEOUT" \
@@ -459,7 +459,11 @@ worktree_cleanup() {
     local branch_name="${BRANCH_PREFIX}/issue-${issue_number}"
 
     if [ -d "$wt_dir" ]; then
-        git -C "$BARE_REPO" worktree remove "$wt_dir" --force 2>/dev/null || rm -rf "$wt_dir"
+        git -C "$BARE_REPO" worktree remove "$wt_dir" --force 2>/dev/null || {
+            # Fallback: remove directory and prune worktree metadata
+            rm -rf "$wt_dir"
+            git -C "$BARE_REPO" worktree prune 2>/dev/null || true
+        }
     fi
     git -C "$BARE_REPO" branch -D "$branch_name" 2>/dev/null || true
 
@@ -638,6 +642,22 @@ for f in plan['files']:
             warn "Failed to generate ${path}, skipping"
             continue
         }
+
+        # Validate content before writing
+        local content_size=${#content}
+        if [ "$content_size" -gt 10485760 ]; then
+            warn "Generated content for ${path} too large (${content_size} bytes > 10MB), skipping"
+            continue
+        fi
+        if [ -z "$content" ]; then
+            warn "Generated empty content for ${path}, skipping"
+            continue
+        fi
+        # Check for null bytes (binary content)
+        if printf '%s' "$content" | grep -qP '\x00' 2>/dev/null; then
+            warn "Generated content for ${path} contains null bytes (binary?), skipping"
+            continue
+        fi
 
         # Ensure parent directory exists
         mkdir -p "$wt_dir/$(dirname "$path")"

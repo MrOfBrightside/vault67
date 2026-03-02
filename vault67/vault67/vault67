@@ -1696,7 +1696,7 @@ print(json.dumps({
         # Check for model not found — auto-pull
         if grep -q "model.*not found\|no such model" "$response_file" 2>/dev/null; then
             warn "Model '${OLLAMA_MODEL}' not found — pulling..."
-            if /opt/homebrew/bin/ollama pull "$OLLAMA_MODEL" 2>&1 | tail -1; then
+            if command -v ollama >/dev/null 2>&1 && ollama pull "$OLLAMA_MODEL" 2>&1 | tail -1; then
                 success "Model '${OLLAMA_MODEL}' pulled successfully"
                 rm -f "$response_file"
                 # Retry the request
