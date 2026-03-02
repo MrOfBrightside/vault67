@@ -81,7 +81,7 @@ _replace_spec_section() {
     escaped_header=$(echo "$header" | sed 's/[[\.*^$()+?{|]/\\&/g')
     awk -v header_re="^${escaped_header}" -v replacement="$temp_content" '
         $0 ~ header_re {
-            system("cat " replacement)
+            system("cat \"" replacement "\"")
             in_section = 1
             next
         }

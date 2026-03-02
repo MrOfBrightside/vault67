@@ -1166,10 +1166,19 @@ architecture_compliance_agent() {
 
         # Find directories containing files whose names match scenario keywords
         for word in $scenario_words; do
+            # Sanitize word: only allow alphanumeric chars (prevent shell injection)
+            local safe_word
+            safe_word=$(echo "$word" | tr -cd 'a-z0-9')
+            [ -z "$safe_word" ] && continue
+            local safe_singular
+            safe_singular=$(echo "$safe_word" | sed 's/s$//')
+
+            # Build find args array safely (no eval)
+            local -a find_args=("$repo_path" -maxdepth 3 -type f)
+            find_args+=( '(' -name "*${safe_word}*" -o -name "*${safe_singular}*" ')' )
+
             local matches
-            matches=$(eval "find \"$repo_path\" -maxdepth 3 -type f \
-                \\( -name \"*${word}*\" -o -name \"*$(echo "$word" | sed 's/s$//')*\" \\) \
-                $_find_excludes" 2>/dev/null | head -5)
+            matches=$(find "${find_args[@]}" 2>/dev/null | head -5)
             if [ -n "$matches" ]; then
                 local dirs
                 dirs=$(echo "$matches" | while read -r f; do
@@ -1901,7 +1910,7 @@ IN_SCOPE:
         printf '%s\n' "### In scope" "$new_scope_in" > "$temp_scope"
         awk -v replacement="$temp_scope" '
             /^### In scope/ {
-                system("cat " replacement)
+                system("cat \"" replacement "\"")
                 in_section = 1
                 next
             }

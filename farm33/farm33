@@ -463,7 +463,8 @@ worktree_cleanup() {
     fi
     git -C "$BARE_REPO" branch -D "$branch_name" 2>/dev/null || true
 
-    rm -f "$LOCKDIR/issue-${issue_number}.lock"
+    rm -rf "$LOCKDIR/issue-${issue_number}.lock.d" 2>/dev/null || true
+    rm -f "$LOCKDIR/issue-${issue_number}.lock" 2>/dev/null || true
 }
 
 # ============================================================================
@@ -1013,9 +1014,9 @@ Respond with ONLY a JSON object (no fences):
 
     local result
     result=$(ollama_generate "$user_prompt" "$system_prompt") || {
-        log_worker "Spec review: LLM call failed — defaulting to pass"
-        echo '{"verdict":"pass","confidence":0,"gaps":[]}'
-        return 0
+        log_worker "Spec review: LLM call failed — returning error verdict"
+        echo '{"verdict":"error","confidence":0,"gaps":["LLM call failed"]}'
+        return 1
     }
 
     # Parse JSON
@@ -1025,9 +1026,9 @@ Respond with ONLY a JSON object (no fences):
     printf '%s' "$result" > "$_sr_tmpfile"
     review_json=$(parse_llm_json_object "$_sr_tmpfile" "verdict" 2>/dev/null) || {
         rm -f "$_sr_tmpfile"
-        log_worker "Spec review: parse failed — defaulting to pass"
-        echo '{"verdict":"pass","confidence":0,"gaps":[]}'
-        return 0
+        log_worker "Spec review: parse failed — returning error verdict"
+        echo '{"verdict":"error","confidence":0,"gaps":["LLM response unparseable"]}'
+        return 1
     }
     rm -f "$_sr_tmpfile"
 
@@ -1076,9 +1077,9 @@ Respond with ONLY a JSON object (no fences):
 
     local result
     result=$(ollama_generate "$user_prompt" "$system_prompt") || {
-        log_worker "Acceptance check: LLM call failed — defaulting to pass"
-        echo '{"all_satisfied":true,"scenarios":[]}'
-        return 0
+        log_worker "Acceptance check: LLM call failed — returning error"
+        echo '{"all_satisfied":false,"scenarios":[],"error":"LLM call failed"}'
+        return 1
     }
 
     local acc_json _ac_tmpfile
@@ -1087,9 +1088,9 @@ Respond with ONLY a JSON object (no fences):
     printf '%s' "$result" > "$_ac_tmpfile"
     acc_json=$(parse_llm_json_object "$_ac_tmpfile" "all_satisfied" 2>/dev/null) || {
         rm -f "$_ac_tmpfile"
-        log_worker "Acceptance check: parse failed — defaulting to pass"
-        echo '{"all_satisfied":true,"scenarios":[]}'
-        return 0
+        log_worker "Acceptance check: parse failed — returning error"
+        echo '{"all_satisfied":false,"scenarios":[],"error":"parse failed"}'
+        return 1
     }
     rm -f "$_ac_tmpfile"
 
@@ -1140,9 +1141,9 @@ Respond with ONLY a JSON object (no fences):
 
     local result
     result=$(ollama_generate "$user_prompt" "$system_prompt") || {
-        log_worker "Diff review: LLM call failed — defaulting to 50"
-        echo "50"
-        return 0
+        log_worker "Diff review: LLM call failed — returning 0 confidence"
+        echo "0"
+        return 1
     }
 
     local diff_json _dr_tmpfile
@@ -1151,9 +1152,9 @@ Respond with ONLY a JSON object (no fences):
     printf '%s' "$result" > "$_dr_tmpfile"
     diff_json=$(parse_llm_json_object "$_dr_tmpfile" "confidence" 2>/dev/null) || {
         rm -f "$_dr_tmpfile"
-        log_worker "Diff review: parse failed — defaulting to 50"
-        echo "50"
-        return 0
+        log_worker "Diff review: parse failed — returning 0 confidence"
+        echo "0"
+        return 1
     }
     rm -f "$_dr_tmpfile"
 
@@ -1345,9 +1346,11 @@ worker_run() {
     local worker_id="${2:-0}"
     export WORKER_ID="$worker_id"
 
-    # Create lockfile
+    # Create lockfile (atomic mkdir for issue lock)
+    local lock_path="$LOCKDIR/issue-${issue_number}.lock.d"
+    mkdir -p "$lock_path" 2>/dev/null || true
+    echo "$worker_id" > "$lock_path/worker"
     echo "$issue_number" > "$LOCKDIR/worker-${worker_id}.lock"
-    echo "$worker_id" > "$LOCKDIR/issue-${issue_number}.lock"
 
     log_worker "=== Starting work on issue #${issue_number} ==="
 
@@ -1415,10 +1418,11 @@ worker_run() {
             local combined_feedback=""
 
             # Gate 1: Spec review — does the code match the spec?
-            spec_review_result=$(verify_spec_review "$wt_dir" "$promptpack")
+            local spec_review_result
+            spec_review_result=$(verify_spec_review "$wt_dir" "$promptpack") || true
             local spec_verdict
             spec_verdict=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('verdict','pass'))" "$spec_review_result")
-            if [ "$spec_verdict" = "fail" ]; then
+            if [ "$spec_verdict" = "fail" ] || [ "$spec_verdict" = "error" ]; then
                 gates_ok=false
                 local gaps
                 gaps=$(python3 -c "
@@ -1483,10 +1487,11 @@ ${test_errors}
             fi
 
             # Gate 4: Acceptance criteria — are all scenarios satisfied?
-            acceptance_result=$(verify_acceptance_criteria "$wt_dir" "$promptpack")
+            local acceptance_result
+            acceptance_result=$(verify_acceptance_criteria "$wt_dir" "$promptpack") || true
             local all_satisfied
             all_satisfied=$(python3 -c "import json,sys; print(str(json.loads(sys.argv[1]).get('all_satisfied',True)).lower())" "$acceptance_result")
-            if [ "$all_satisfied" = "false" ]; then
+            if [ "$all_satisfied" = "false" ] || python3 -c "import json,sys; sys.exit(0 if 'error' in json.loads(sys.argv[1]) else 1)" "$acceptance_result" 2>/dev/null; then
                 gates_ok=false
                 local acc_gaps
                 acc_gaps=$(python3 -c "
@@ -1534,7 +1539,7 @@ ${acc_gaps}
 
         # Diff review (advisory, post-commit, determines draft status)
         local confidence
-        confidence=$(verify_diff_review "$wt_dir" "$promptpack")
+        confidence=$(verify_diff_review "$wt_dir" "$promptpack") || confidence=0
 
         # Push
         push_branch "$wt_dir" "${BRANCH_PREFIX}/issue-${issue_number}" || {
@@ -1612,7 +1617,9 @@ Reverting to READY_TO_IMPLEMENT for retry."
     ) || exit_status=$?
 
     # Remove lockfiles
-    rm -f "$LOCKDIR/worker-${worker_id}.lock" "$LOCKDIR/issue-${issue_number}.lock"
+    rm -f "$LOCKDIR/worker-${worker_id}.lock"
+    rm -rf "$LOCKDIR/issue-${issue_number}.lock.d" 2>/dev/null || true
+    rm -f "$LOCKDIR/issue-${issue_number}.lock" 2>/dev/null || true
 
     log_worker "=== Finished issue #${issue_number} (exit: ${exit_status}) ==="
     return $exit_status
@@ -1637,17 +1644,23 @@ pool_find_free() {
 pool_dispatch() {
     local issue_number="$1"
 
-    # Check if already being worked on
-    if [ -f "$LOCKDIR/issue-${issue_number}.lock" ]; then
-        warn "Issue #${issue_number} already in progress"
+    # Atomic lock via mkdir (fails if dir already exists = already locked)
+    local lock_path="$LOCKDIR/issue-${issue_number}.lock.d"
+    if ! mkdir "$lock_path" 2>/dev/null; then
+        warn "Issue #${issue_number} already in progress (locked)"
         return 1
     fi
 
     local worker_id
     worker_id=$(pool_find_free) || {
+        rmdir "$lock_path" 2>/dev/null || true
         warn "No free worker slots (pool size: ${POOL_SIZE})"
         return 1
     }
+
+    # Write lock metadata after atomic claim
+    echo "$worker_id" > "$lock_path/worker"
+    echo "$issue_number" > "$LOCKDIR/worker-${worker_id}.lock"
 
     info "Dispatching #${issue_number} to worker ${worker_id}"
     tmux new-session -d -s "farm33-worker-${worker_id}" \
@@ -1743,8 +1756,8 @@ cmd_batch() {
     info "Dispatching ${#issues[@]} issues to worker pool..."
 
     for issue_number in "${issues[@]}"; do
-        # Skip if already locked
-        if [ -f "$LOCKDIR/issue-${issue_number}.lock" ]; then
+        # Skip if already locked (check both old and new lock formats)
+        if [ -d "$LOCKDIR/issue-${issue_number}.lock.d" ] || [ -f "$LOCKDIR/issue-${issue_number}.lock" ]; then
             warn "Skipping #${issue_number} — already in progress"
             continue
         fi
@@ -1841,13 +1854,17 @@ cmd_cleanup() {
         i=$((i + 1))
     done
 
-    # Remove orphaned issue lockfiles
-    for lockfile in "$LOCKDIR"/issue-*.lock; do
-        [ -f "$lockfile" ] || continue
+    # Remove orphaned issue lockfiles (both old and new format)
+    for lockfile in "$LOCKDIR"/issue-*.lock "$LOCKDIR"/issue-*.lock.d; do
+        [ -e "$lockfile" ] || continue
         local wid
-        wid=$(cat "$lockfile" 2>/dev/null)
-        if ! tmux has-session -t "farm33-worker-${wid}" 2>/dev/null; then
-            rm -f "$lockfile"
+        if [ -d "$lockfile" ]; then
+            wid=$(cat "$lockfile/worker" 2>/dev/null)
+        else
+            wid=$(cat "$lockfile" 2>/dev/null)
+        fi
+        if [ -z "$wid" ] || ! tmux has-session -t "farm33-worker-${wid}" 2>/dev/null; then
+            rm -rf "$lockfile"
         fi
     done
 
@@ -1856,7 +1873,7 @@ cmd_cleanup() {
         [ -d "$wt_dir" ] || continue
         local issue_num
         issue_num=$(basename "$wt_dir" | sed 's/issue-//')
-        if [ ! -f "$LOCKDIR/issue-${issue_num}.lock" ]; then
+        if [ ! -d "$LOCKDIR/issue-${issue_num}.lock.d" ] && [ ! -f "$LOCKDIR/issue-${issue_num}.lock" ]; then
             info "Removing stale worktree: ${wt_dir}"
             worktree_cleanup "$issue_num"
         fi
@@ -1888,7 +1905,7 @@ cmd_list() {
         labels=$(echo "$issue_data" | extract_issue_labels 2>/dev/null) || labels=""
 
         local status_icon="📋"
-        if [ -f "$LOCKDIR/issue-${num}.lock" ]; then
+        if [ -d "$LOCKDIR/issue-${num}.lock.d" ] || [ -f "$LOCKDIR/issue-${num}.lock" ]; then
             status_icon="🔨"
         fi
         if echo "$labels" | grep -q "has:subtasks"; then
