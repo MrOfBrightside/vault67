@@ -832,9 +832,21 @@ for p in patches:
 # Section 7b: Verification Gates
 # ============================================================================
 
+# Cache for collect_changed_files — avoids repeated git calls per iteration
+# Set _CHANGED_FILES_CACHE="" to invalidate (e.g., after repair modifies files)
+_CHANGED_FILES_CACHE=""
+_CHANGED_FILES_CACHE_DIR=""
+
 collect_changed_files() {
     local wt_dir="$1"
     local max_per_file="${2:-8000}"
+
+    # Return cached result if same dir and cache is populated
+    if [ -n "$_CHANGED_FILES_CACHE" ] && [ "$_CHANGED_FILES_CACHE_DIR" = "$wt_dir" ]; then
+        echo "$_CHANGED_FILES_CACHE"
+        return 0
+    fi
+
     local changed_files=""
     local diff_output
     diff_output=$(cd "$wt_dir" && git diff --name-only HEAD 2>/dev/null)
@@ -854,6 +866,10 @@ ${content}
 
 "
     done <<< "$all_changed"
+
+    # Cache the result
+    _CHANGED_FILES_CACHE="$changed_files"
+    _CHANGED_FILES_CACHE_DIR="$wt_dir"
     echo "$changed_files"
 }
 
@@ -1376,8 +1392,8 @@ worker_run() {
 
     # Step 1: Claim issue
     log_worker "Claiming issue #${issue_number}..."
-    api_replace_labels "$issue_number" "state:IMPLEMENTING" > /dev/null 2>&1 || true
-    api_add_comment "$issue_number" "🤖 **farm33** — Implementation started (worker ${worker_id}, model: ${OLLAMA_MODEL})" > /dev/null 2>&1 || true
+    api_replace_labels "$issue_number" "state:IMPLEMENTING" > /dev/null 2>&1 || warn "Failed to set IMPLEMENTING label on #${issue_number}"
+    api_add_comment "$issue_number" "🤖 **farm33** — Implementation started (worker ${worker_id}, model: ${OLLAMA_MODEL})" > /dev/null 2>&1 || warn "Failed to add start comment on #${issue_number}"
 
     local exit_status=0
 
@@ -1432,6 +1448,7 @@ worker_run() {
 
         while [ "$iteration" -lt "$max_refinements" ]; do
             iteration=$((iteration + 1))
+            _CHANGED_FILES_CACHE=""  # Invalidate cache at start of each iteration
             log_worker "━━━ Refinement iteration ${iteration}/${max_refinements} ━━━"
 
             local gates_ok=true
@@ -1595,7 +1612,7 @@ ${acc_gaps}
         # Update issue state based on final verdict
         if [ "$is_draft" = "false" ]; then
             log_worker "✅ Issue #${issue_number} — DONE (all gates passed, confidence: ${confidence})"
-            api_replace_labels "$issue_number" "state:DONE" > /dev/null 2>&1 || true
+            api_replace_labels "$issue_number" "state:DONE" > /dev/null 2>&1 || warn "Failed to set DONE label on #${issue_number}"
             local done_comment="🤖 **farm33** — Implementation complete ✅
 
 | Check | Result |
@@ -1608,11 +1625,11 @@ ${acc_gaps}
             [ -n "$pr_url" ] && done_comment+="
 
 PR: ${pr_url}"
-            api_add_comment "$issue_number" "$done_comment" > /dev/null 2>&1 || true
-            api_close_issue "$issue_number" > /dev/null 2>&1 || true
+            api_add_comment "$issue_number" "$done_comment" > /dev/null 2>&1 || warn "Failed to add done comment on #${issue_number}"
+            api_close_issue "$issue_number" > /dev/null 2>&1 || warn "Failed to close #${issue_number}"
         else
             log_worker "⚠️ Issue #${issue_number} — pushed as draft (gates: $([ "$all_gates_pass" = "true" ] && echo "passed" || echo "failed"), confidence: ${confidence:-50})"
-            api_replace_labels "$issue_number" "state:READY_TO_IMPLEMENT" > /dev/null 2>&1 || true
+            api_replace_labels "$issue_number" "state:READY_TO_IMPLEMENT" > /dev/null 2>&1 || warn "Failed to set READY_TO_IMPLEMENT label on #${issue_number}"
             local fail_comment="🤖 **farm33** — Implementation pushed as draft PR
 
 | Check | Result |
@@ -1627,7 +1644,7 @@ PR: ${pr_url}"
 Draft PR: ${pr_url}"
             fail_comment+="
 Reverting to READY_TO_IMPLEMENT for retry."
-            api_add_comment "$issue_number" "$fail_comment" > /dev/null 2>&1 || true
+            api_add_comment "$issue_number" "$fail_comment" > /dev/null 2>&1 || warn "Failed to add draft comment on #${issue_number}"
         fi
 
         # Cleanup worktree
