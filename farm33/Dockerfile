@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY farm33 farm33-watch forge ./
+COPY lib/ lib/
 COPY prompts/ prompts/
 COPY .farm33.conf.example .forge.conf.example .
 

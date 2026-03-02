@@ -16,22 +16,8 @@ PROMPTS_DIR="$SCRIPT_DIR/prompts"
 BARE_REPO="$SCRIPT_DIR/.repo.git"
 LOCKDIR="$SCRIPT_DIR/.locks"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-error()   { echo -e "${RED}Error: $*${NC}" >&2; exit 1; }
-success() { echo -e "${GREEN}✓ $*${NC}"; }
-info()    { echo -e "${BLUE}→ $*${NC}"; }
-warn()    { echo -e "${YELLOW}⚠ $*${NC}" >&2; }
-
-log_worker() {
-    local worker_id="${WORKER_ID:-main}"
-    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] [worker-${worker_id}] $*" >&2
-}
+source "${SCRIPT_DIR}/lib/helpers.bash"
+trap safe_cleanup EXIT
 
 load_config() {
     local config_file="$SCRIPT_DIR/.farm33.conf"
@@ -90,6 +76,7 @@ api_request() {
     local url="${FORGEJO_API}${endpoint}"
     local response_file
     response_file=$(mktemp)
+    register_temp_file "$response_file"
     local http_code
 
     if [ -n "$data" ]; then
@@ -222,18 +209,6 @@ except Exception:
 " <<< "$deps_response"
 }
 
-extract_issue_title() {
-    python3 -c "import sys,json; print(json.load(sys.stdin)['title'])"
-}
-
-extract_issue_body() {
-    python3 -c "import sys,json; print(json.load(sys.stdin)['body'])"
-}
-
-extract_issue_labels() {
-    python3 -c "import sys,json; print(' '.join([l['name'] for l in json.load(sys.stdin)['labels']]))"
-}
-
 # ============================================================================
 # Section 3: Ollama
 # ============================================================================
@@ -243,6 +218,7 @@ ollama_generate() {
     local system_prompt="${2:-}"
     local response_file
     response_file=$(mktemp)
+    register_temp_file "$response_file"
 
     local json_payload
     if [ -n "$system_prompt" ]; then
@@ -322,6 +298,7 @@ ollama_chat() {
     local messages_json="$1"
     local response_file
     response_file=$(mktemp)
+    register_temp_file "$response_file"
 
     local json_payload
     json_payload=$(python3 -c "
@@ -623,6 +600,7 @@ Respond with ONLY a JSON object (no markdown fences, no explanation):
     # Extract JSON from response (strip markdown fences, parse)
     local plan_json _plan_tmpfile
     _plan_tmpfile=$(mktemp)
+    register_temp_file "$_plan_tmpfile"
     printf '%s' "$plan_output" > "$_plan_tmpfile"
     plan_json=$(python3 -c '
 import json, re, sys
@@ -776,6 +754,7 @@ run_golden_test() {
     local test_cmd="$2"
     local output_file
     output_file=$(mktemp)
+    register_temp_file "$output_file"
 
     if [ -z "$test_cmd" ]; then
         log_worker "No golden test command — skipping validation"
@@ -784,7 +763,7 @@ run_golden_test() {
     fi
 
     log_worker "Running golden test: ${test_cmd}"
-    if (cd "$wt_dir" && eval "$test_cmd" > "$output_file" 2>&1); then
+    if safe_eval_cmd "$wt_dir" "$test_cmd" > "$output_file" 2>&1; then
         log_worker "Tests PASSED"
         rm -f "$output_file"
         return 0
@@ -806,7 +785,7 @@ run_golden_build() {
     fi
 
     log_worker "Running golden build: ${build_cmd}"
-    if (cd "$wt_dir" && eval "$build_cmd" > /dev/null 2>&1); then
+    if safe_eval_cmd "$wt_dir" "$build_cmd" > /dev/null 2>&1; then
         log_worker "Build PASSED"
         return 0
     else
@@ -886,6 +865,7 @@ print(json.dumps(messages))
     # Parse patches
     local patches _ar_tmpfile
     _ar_tmpfile=$(mktemp)
+    register_temp_file "$_ar_tmpfile"
     printf '%s' "$repair_output" > "$_ar_tmpfile"
     patches=$(python3 -c '
 import json, re, sys
@@ -1075,6 +1055,7 @@ Respond with ONLY a JSON array (no fences, no explanation):
     # Parse JSON array
     local test_files_json _st_tmpfile
     _st_tmpfile=$(mktemp)
+    register_temp_file "$_st_tmpfile"
     printf '%s' "$result" > "$_st_tmpfile"
     test_files_json=$(python3 -c '
 import json, re, sys
@@ -1192,6 +1173,7 @@ Respond with ONLY a JSON object (no fences):
     # Parse JSON
     local review_json _sr_tmpfile
     _sr_tmpfile=$(mktemp)
+    register_temp_file "$_sr_tmpfile"
     printf '%s' "$result" > "$_sr_tmpfile"
     review_json=$(python3 -c '
 import json, re, sys
@@ -1278,6 +1260,7 @@ Respond with ONLY a JSON object (no fences):
 
     local acc_json _ac_tmpfile
     _ac_tmpfile=$(mktemp)
+    register_temp_file "$_ac_tmpfile"
     printf '%s' "$result" > "$_ac_tmpfile"
     acc_json=$(python3 -c '
 import json, re, sys
@@ -1366,6 +1349,7 @@ Respond with ONLY a JSON object (no fences):
 
     local diff_json _dr_tmpfile
     _dr_tmpfile=$(mktemp)
+    register_temp_file "$_dr_tmpfile"
     printf '%s' "$result" > "$_dr_tmpfile"
     diff_json=$(python3 -c '
 import json, re, sys
@@ -1463,6 +1447,7 @@ print(json.dumps(messages))
     # Parse patches
     local patches _rr_tmpfile
     _rr_tmpfile=$(mktemp)
+    register_temp_file "$_rr_tmpfile"
     printf '%s' "$repair_output" > "$_rr_tmpfile"
     patches=$(python3 -c '
 import json, re, sys
@@ -1705,7 +1690,8 @@ ${gaps}
             if [ -n "$build_cmd" ]; then
                 local build_output_file
                 build_output_file=$(mktemp)
-                if ! (cd "$wt_dir" && eval "$build_cmd" > "$build_output_file" 2>&1); then
+                register_temp_file "$build_output_file"
+                if ! safe_eval_cmd "$wt_dir" "$build_cmd" > "$build_output_file" 2>&1; then
                     gates_ok=false
                     local build_errors
                     build_errors=$(head -c 8000 "$build_output_file" 2>/dev/null)
@@ -1728,7 +1714,8 @@ ${build_errors}
             if [ -n "$test_cmd" ]; then
                 local test_output_file
                 test_output_file=$(mktemp)
-                if (cd "$wt_dir" && eval "$test_cmd" > "$test_output_file" 2>&1); then
+                register_temp_file "$test_output_file"
+                if safe_eval_cmd "$wt_dir" "$test_cmd" > "$test_output_file" 2>&1; then
                     log_worker "Tests PASSED"
                     rm -f "$test_output_file"
                 else
