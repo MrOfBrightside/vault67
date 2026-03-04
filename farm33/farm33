@@ -942,10 +942,14 @@ $(head -c 4000 "$wt_dir/$f" 2>/dev/null)
 Review whether the code changes satisfy the specification.
 
 ## Specification
+<user-spec>
 ${promptpack}
+</user-spec>
 
 ## Code changes (git diff)
+<user-code>
 ${full_diff}
+</user-code>
 
 ## Output
 Respond with ONLY a JSON object (no fences):
@@ -1005,10 +1009,14 @@ verify_acceptance_criteria() {
 Check whether the implementation satisfies all acceptance criteria from the specification.
 
 ## Specification
+<user-spec>
 ${promptpack}
+</user-spec>
 
 ## Changed files
+<user-code>
 ${changed_files}
+</user-code>
 
 ## Output
 Respond with ONLY a JSON object (no fences):
@@ -1069,10 +1077,14 @@ verify_diff_review() {
 Review the final diff for quality, correctness, and alignment with the specification.
 
 ## Specification
+<user-spec>
 ${promptpack}
+</user-spec>
 
 ## Full diff
+<user-code>
 ${full_diff}
+</user-code>
 
 ## Output
 Respond with ONLY a JSON object (no fences):
@@ -1221,8 +1233,13 @@ push_branch() {
 
     (
         cd "$wt_dir"
-        git push origin "$branch_name" --force-with-lease 2>&1 || git push origin "$branch_name" --force 2>&1
-        log_worker "Pushed branch: ${branch_name}"
+        if git push origin "$branch_name" --force-with-lease 2>&1; then
+            log_worker "Pushed branch: ${branch_name}"
+        else
+            log_worker "Push failed for branch: ${branch_name} (force-with-lease rejected — concurrent changes?)"
+            log_structured error "push failed: ${branch_name}"
+            return 1
+        fi
     )
 }
 
@@ -1275,6 +1292,130 @@ Implements #${issue_number}
     log_worker "PR created: ${pr_url}"
     log_structured info "PR created: ${pr_url}"
     echo "$pr_url"
+}
+
+# ============================================================================
+# Section 8b: Refinement Gate Functions
+# ============================================================================
+# Each gate: returns 0=pass, 1=fail. Appends feedback to GATE_FEEDBACK global.
+# Sets global tracking vars for post-loop reporting.
+
+# Gate 1: Spec review — does the code match the spec?
+run_spec_review_gate() {
+    local wt_dir="$1"
+    local promptpack="$2"
+
+    _LAST_SPEC_REVIEW_RESULT=$(verify_spec_review "$wt_dir" "$promptpack") || true
+    local verdict
+    verdict=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('verdict','pass'))" "$_LAST_SPEC_REVIEW_RESULT")
+
+    if [ "$verdict" = "fail" ] || [ "$verdict" = "error" ]; then
+        local gaps
+        gaps=$(python3 -c "
+import json, sys
+r = json.loads(sys.argv[1])
+for g in r.get('gaps', []):
+    if g.get('status') != 'met':
+        print(f\"- {g.get('requirement','?')}: {g.get('detail','')}\")
+" "$_LAST_SPEC_REVIEW_RESULT")
+        GATE_FEEDBACK+="## Spec Review FAILED
+${gaps}
+
+"
+        return 1
+    fi
+    return 0
+}
+
+# Gate 2: Golden build — does it compile/build?
+run_build_gate() {
+    local wt_dir="$1"
+    local build_cmd="$2"
+
+    [ -z "$build_cmd" ] && return 0
+
+    local build_output_file
+    build_output_file=$(mktemp)
+    register_temp_file "$build_output_file"
+    if safe_eval_cmd "$wt_dir" "$build_cmd" > "$build_output_file" 2>&1; then
+        rm -f "$build_output_file"
+        log_worker "Build PASSED"
+        log_structured info "build passed"
+        return 0
+    else
+        local build_errors
+        build_errors=$(head -c 8000 "$build_output_file" 2>/dev/null)
+        rm -f "$build_output_file"
+        GATE_FEEDBACK+="## Build FAILED
+Command: ${build_cmd}
+Output:
+${build_errors}
+
+"
+        log_worker "Build FAILED"
+        log_structured error "build failed"
+        return 1
+    fi
+}
+
+# Gate 3: Golden tests — do tests pass?
+run_test_gate() {
+    local wt_dir="$1"
+    local test_cmd="$2"
+
+    _LAST_TESTS_PASSED="true"
+    [ -z "$test_cmd" ] && return 0
+
+    local test_output_file
+    test_output_file=$(mktemp)
+    register_temp_file "$test_output_file"
+    if safe_eval_cmd "$wt_dir" "$test_cmd" > "$test_output_file" 2>&1; then
+        log_worker "Tests PASSED"
+        log_structured info "tests passed"
+        rm -f "$test_output_file"
+        return 0
+    else
+        _LAST_TESTS_PASSED="false"
+        local test_errors
+        test_errors=$(head -c 8000 "$test_output_file" 2>/dev/null)
+        rm -f "$test_output_file"
+        GATE_FEEDBACK+="## Tests FAILED
+Command: ${test_cmd}
+Output:
+${test_errors}
+
+"
+        log_worker "Tests FAILED"
+        log_structured error "tests failed"
+        return 1
+    fi
+}
+
+# Gate 4: Acceptance criteria — are all scenarios satisfied?
+run_acceptance_gate() {
+    local wt_dir="$1"
+    local promptpack="$2"
+
+    _LAST_ACCEPTANCE_RESULT=$(verify_acceptance_criteria "$wt_dir" "$promptpack") || true
+    local all_satisfied
+    all_satisfied=$(python3 -c "import json,sys; print(str(json.loads(sys.argv[1]).get('all_satisfied',True)).lower())" "$_LAST_ACCEPTANCE_RESULT")
+
+    if [ "$all_satisfied" = "false" ] || python3 -c "import json,sys; sys.exit(0 if 'error' in json.loads(sys.argv[1]) else 1)" "$_LAST_ACCEPTANCE_RESULT" 2>/dev/null; then
+        local acc_gaps
+        acc_gaps=$(python3 -c "
+import json, sys
+r = json.loads(sys.argv[1])
+for s in r.get('scenarios', []):
+    if not s.get('satisfied', True):
+        print(f\"- {s.get('name','?')}: {s.get('gaps','')}\")
+" "$_LAST_ACCEPTANCE_RESULT")
+        GATE_FEEDBACK+="## Acceptance Criteria FAILED
+${acc_gaps}
+
+"
+        return 1
+    fi
+    return 0
 }
 
 # ============================================================================
@@ -1349,114 +1490,25 @@ worker_run() {
         local iteration=0
         local all_gates_pass=false
 
-        # Track per-gate results for final report
-        local spec_review_result='{"verdict":"skip","confidence":0,"gaps":[]}'
-        local tests_passed="true"
-        local acceptance_result='{"all_satisfied":true,"scenarios":[]}'
+        # Globals used by gate functions for post-loop reporting
+        _LAST_SPEC_REVIEW_RESULT='{"verdict":"skip","confidence":0,"gaps":[]}'
+        _LAST_TESTS_PASSED="true"
+        _LAST_ACCEPTANCE_RESULT='{"all_satisfied":true,"scenarios":[]}'
+        local _prev_feedback_hash=""
 
         while [ "$iteration" -lt "$max_refinements" ]; do
             iteration=$((iteration + 1))
-            _CHANGED_FILES_CACHE=""  # Invalidate cache at start of each iteration
+            _CHANGED_FILES_CACHE=""
+            GATE_FEEDBACK=""
+            local gates_ok=true
+
             log_worker "━━━ Refinement iteration ${iteration}/${max_refinements} ━━━"
 
-            local gates_ok=true
-            local combined_feedback=""
+            run_spec_review_gate "$wt_dir" "$promptpack"   || gates_ok=false
+            run_build_gate "$wt_dir" "$build_cmd"           || gates_ok=false
+            run_test_gate "$wt_dir" "$test_cmd"             || gates_ok=false
+            run_acceptance_gate "$wt_dir" "$promptpack"     || gates_ok=false
 
-            # Gate 1: Spec review — does the code match the spec?
-            local spec_review_result
-            spec_review_result=$(verify_spec_review "$wt_dir" "$promptpack") || true
-            local spec_verdict
-            spec_verdict=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('verdict','pass'))" "$spec_review_result")
-            if [ "$spec_verdict" = "fail" ] || [ "$spec_verdict" = "error" ]; then
-                gates_ok=false
-                local gaps
-                gaps=$(python3 -c "
-import json, sys
-r = json.loads(sys.argv[1])
-for g in r.get('gaps', []):
-    if g.get('status') != 'met':
-        print(f\"- {g.get('requirement','?')}: {g.get('detail','')}\")
-" "$spec_review_result")
-                combined_feedback+="## Spec Review FAILED
-${gaps}
-
-"
-            fi
-
-            # Gate 2: Golden build — does it compile/build?
-            if [ -n "$build_cmd" ]; then
-                local build_output_file
-                build_output_file=$(mktemp)
-                register_temp_file "$build_output_file"
-                if ! safe_eval_cmd "$wt_dir" "$build_cmd" > "$build_output_file" 2>&1; then
-                    gates_ok=false
-                    local build_errors
-                    build_errors=$(head -c 8000 "$build_output_file" 2>/dev/null)
-                    rm -f "$build_output_file"
-                    combined_feedback+="## Build FAILED
-Command: ${build_cmd}
-Output:
-${build_errors}
-
-"
-                    log_worker "Build FAILED"
-                    log_structured error "build failed (iteration ${iteration})"
-                else
-                    rm -f "$build_output_file"
-                    log_worker "Build PASSED"
-                    log_structured info "build passed (iteration ${iteration})"
-                fi
-            fi
-
-            # Gate 3: Golden tests — do tests pass?
-            tests_passed="true"
-            if [ -n "$test_cmd" ]; then
-                local test_output_file
-                test_output_file=$(mktemp)
-                register_temp_file "$test_output_file"
-                if safe_eval_cmd "$wt_dir" "$test_cmd" > "$test_output_file" 2>&1; then
-                    log_worker "Tests PASSED"
-                    log_structured info "tests passed (iteration ${iteration})"
-                    rm -f "$test_output_file"
-                else
-                    tests_passed="false"
-                    gates_ok=false
-                    local test_errors
-                    test_errors=$(head -c 8000 "$test_output_file" 2>/dev/null)
-                    rm -f "$test_output_file"
-                    combined_feedback+="## Tests FAILED
-Command: ${test_cmd}
-Output:
-${test_errors}
-
-"
-                    log_worker "Tests FAILED"
-                    log_structured error "tests failed (iteration ${iteration})"
-                fi
-            fi
-
-            # Gate 4: Acceptance criteria — are all scenarios satisfied?
-            local acceptance_result
-            acceptance_result=$(verify_acceptance_criteria "$wt_dir" "$promptpack") || true
-            local all_satisfied
-            all_satisfied=$(python3 -c "import json,sys; print(str(json.loads(sys.argv[1]).get('all_satisfied',True)).lower())" "$acceptance_result")
-            if [ "$all_satisfied" = "false" ] || python3 -c "import json,sys; sys.exit(0 if 'error' in json.loads(sys.argv[1]) else 1)" "$acceptance_result" 2>/dev/null; then
-                gates_ok=false
-                local acc_gaps
-                acc_gaps=$(python3 -c "
-import json, sys
-r = json.loads(sys.argv[1])
-for s in r.get('scenarios', []):
-    if not s.get('satisfied', True):
-        print(f\"- {s.get('name','?')}: {s.get('gaps','')}\")
-" "$acceptance_result")
-                combined_feedback+="## Acceptance Criteria FAILED
-${acc_gaps}
-
-"
-            fi
-
-            # === VOTE: All gates pass? ===
             if [ "$gates_ok" = "true" ]; then
                 log_worker "✅ All gates PASSED on iteration ${iteration} — ready"
                 log_structured info "all gates passed (iteration ${iteration})"
@@ -1466,9 +1518,18 @@ ${acc_gaps}
 
             log_worker "Gates failed on iteration ${iteration}"
 
-            # More iterations? Repair using combined feedback and try again
+            # Convergence detection: bail if same errors repeat
+            local _cur_feedback_hash
+            _cur_feedback_hash=$(printf '%s' "$GATE_FEEDBACK" | md5sum 2>/dev/null | cut -d' ' -f1 || printf '%s' "$GATE_FEEDBACK" | md5 2>/dev/null)
+            if [ -n "$_prev_feedback_hash" ] && [ "$_cur_feedback_hash" = "$_prev_feedback_hash" ]; then
+                log_worker "Convergence detected — same errors repeating, stopping refinement"
+                log_structured warn "refinement converged (iteration ${iteration}) — same gate failures"
+                break
+            fi
+            _prev_feedback_hash="$_cur_feedback_hash"
+
             if [ "$iteration" -lt "$max_refinements" ]; then
-                refinement_repair "$wt_dir" "$promptpack" "$combined_feedback" "$iteration" || {
+                refinement_repair "$wt_dir" "$promptpack" "$GATE_FEEDBACK" "$iteration" || {
                     log_worker "Repair failed — continuing to next iteration"
                 }
             else
@@ -1492,12 +1553,17 @@ ${acc_gaps}
         confidence=$(verify_diff_review "$wt_dir" "$promptpack") || confidence=0
 
         # Push
+        local push_failed=false
         push_branch "$wt_dir" "${BRANCH_PREFIX}/issue-${issue_number}" || {
-            warn "Push failed"
+            push_failed=true
+            warn "Push failed — PR will be marked as draft"
         }
 
         # Determine final verdict
         local is_draft="false"
+        if [ "$push_failed" = "true" ]; then
+            is_draft="true"
+        fi
         if [ "$all_gates_pass" != "true" ]; then
             is_draft="true"
         fi
@@ -1507,11 +1573,11 @@ ${acc_gaps}
 
         # Build display strings for PR
         local spec_verdict_display
-        spec_verdict_display=$(python3 -c "import json,sys; v=json.loads(sys.argv[1]).get('verdict','skip'); c=json.loads(sys.argv[1]).get('confidence',0); print(f'{v.upper()} ({c}/100)')" "$spec_review_result" 2>/dev/null || echo "SKIP")
+        spec_verdict_display=$(python3 -c "import json,sys; v=json.loads(sys.argv[1]).get('verdict','skip'); c=json.loads(sys.argv[1]).get('confidence',0); print(f'{v.upper()} ({c}/100)')" "$_LAST_SPEC_REVIEW_RESULT" 2>/dev/null || echo "SKIP")
         local acc_display
-        acc_display=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); s=r.get('all_satisfied',True); n=len(r.get('scenarios',[])); print(f'ALL SATISFIED ({n} scenarios)' if s else f'GAPS REMAIN ({n} scenarios)')" "$acceptance_result" 2>/dev/null || echo "SKIP")
+        acc_display=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); s=r.get('all_satisfied',True); n=len(r.get('scenarios',[])); print(f'ALL SATISFIED ({n} scenarios)' if s else f'GAPS REMAIN ({n} scenarios)')" "$_LAST_ACCEPTANCE_RESULT" 2>/dev/null || echo "SKIP")
         local tests_display
-        if [ "$tests_passed" = "true" ]; then
+        if [ "$_LAST_TESTS_PASSED" = "true" ]; then
             tests_display="PASS"
         else
             tests_display="FAIL"

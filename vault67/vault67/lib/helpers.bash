@@ -36,6 +36,19 @@ warn() {
     echo -e "${YELLOW}⚠ $*${NC}"
 }
 
+# Structured logging (JSON lines) — mirrors farm33 pattern
+# Writes to VAULT67_STRUCTURED_LOG when set, otherwise no-op
+log_structured() {
+    [ -n "${VAULT67_STRUCTURED_LOG:-}" ] || return 0
+    local level="$1"
+    shift
+    local message="$*"
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    printf '{"ts":"%s","level":"%s","component":"vault67","issue":"%s","msg":"%s"}\n' \
+        "$ts" "$level" "${CURRENT_ISSUE:-}" "$message" >> "$VAULT67_STRUCTURED_LOG"
+}
+
 # Extract issue number from API response
 extract_issue_number() {
     python3 -c "import sys, json; print(json.load(sys.stdin)['number'])"

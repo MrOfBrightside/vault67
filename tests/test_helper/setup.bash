@@ -17,3 +17,8 @@ load_farm33_helpers() {
     # Source farm33 helpers without triggering main script
     source "${PROJECT_ROOT}/farm33/lib/helpers.bash"
 }
+
+load_mock_http() {
+    # Load mock overrides for ollama_generate/ollama_chat
+    source "${TESTS_DIR}/lib/mock-http.bash"
+}

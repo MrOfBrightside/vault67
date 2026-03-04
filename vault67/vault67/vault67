@@ -513,6 +513,70 @@ _judge_add_question() {
     ' "$qfile" > "$temp_qfile" && mv "$temp_qfile" "$qfile"
 }
 
+# Pipeline checkpoint helpers
+# Writes checkpoint after each agent completes; on restart, skips completed agents.
+_PIPELINE_AGENTS=(spec_enrichment ba_translator architecture lead_developer security test_strategy judge)
+
+_write_checkpoint() {
+    local checkpoint_file="$1"
+    local agent_name="$2"
+    echo "$agent_name" > "$checkpoint_file"
+}
+
+_should_skip_agent() {
+    local checkpoint_file="$1"
+    local agent_name="$2"
+    [ ! -f "$checkpoint_file" ] && return 1  # no checkpoint = don't skip
+
+    local checkpoint_agent
+    checkpoint_agent=$(cat "$checkpoint_file")
+
+    # Skip if agent is before or equal to checkpoint in pipeline order
+    local i cp_idx=-1 ag_idx=-1
+    for i in "${!_PIPELINE_AGENTS[@]}"; do
+        [ "${_PIPELINE_AGENTS[$i]}" = "$checkpoint_agent" ] && cp_idx=$i
+        [ "${_PIPELINE_AGENTS[$i]}" = "$agent_name" ] && ag_idx=$i
+    done
+
+    # Skip if this agent's index <= checkpoint index
+    [ "$ag_idx" -le "$cp_idx" ]
+}
+
+# Validate that farm33 can consume the spec (contract check)
+# Returns 0 if all parseable fields exist, 1 if missing
+validate_farm33_contract() {
+    local spec_content="$1"
+    local pass=true
+
+    # Golden commands extractable
+    if ! echo "$spec_content" | grep -q "Golden build command:[[:space:]]*[^[:space:]]"; then
+        warn "Contract: missing 'Golden build command:' line"
+        pass=false
+    fi
+    if ! echo "$spec_content" | grep -q "Golden test command:[[:space:]]*[^[:space:]]"; then
+        warn "Contract: missing 'Golden test command:' line"
+        pass=false
+    fi
+
+    # Gherkin has Feature: + Scenario: blocks
+    if ! echo "$spec_content" | grep -q "Feature:"; then
+        warn "Contract: missing 'Feature:' block in Gherkin"
+        pass=false
+    fi
+    if ! echo "$spec_content" | grep -q "Scenario:"; then
+        warn "Contract: missing 'Scenario:' block in Gherkin"
+        pass=false
+    fi
+
+    # Base ref extractable (look for common patterns)
+    if ! echo "$spec_content" | grep -qE "Base ref:|base_ref:|Target branch:"; then
+        warn "Contract: no extractable base ref found"
+        pass=false
+    fi
+
+    [ "$pass" = "true" ]
+}
+
 # Judge Agent - Evaluates Definition of Ready
 judge_agent() {
     local spec_file="$1"
@@ -1701,11 +1765,13 @@ spec_enrichment_agent() {
     local expand_prompt="You are a senior Business Analyst expanding a thin software specification into a proper one.
 
 CURRENT SPEC (thin/incomplete):
+<user-spec>
 Title: ${title}
 Context: ${context}
 Goal: ${goal}
 Requirements: ${requirements}
 In Scope: ${scope_in}
+</user-spec>
 
 The fields above are thin, duplicated, or placeholder text. Your job is to expand them into distinct, specific content based on reasonable inferences from the title and any real content present.
 
@@ -1932,6 +1998,7 @@ ba_translator_agent() {
     # Build the LLM prompt
     local prompt="You are a Business Analyst writing Gherkin acceptance criteria for a software feature.
 
+<user-spec>
 CONTEXT:
 ${context}
 
@@ -1946,6 +2013,7 @@ ${scope_in}
 
 OUT OF SCOPE:
 ${scope_out}
+</user-spec>
 
 INSTRUCTIONS:
 Write concrete, testable Gherkin scenarios for this feature. Follow these rules strictly:
@@ -2472,6 +2540,7 @@ Do NOT assign e2e layer. Downgrade UI-related scenarios to integration or unit.
         local prompt
         prompt="You are a test strategy advisor. Given these Gherkin scenarios and the detected test layers, map each scenario to a specific test layer, framework, and suggested file location.
 
+<user-spec>
 GHERKIN SCENARIOS:
 ${gherkin}
 
@@ -2479,6 +2548,7 @@ DETECTED TEST LAYERS:
 $(echo -e "$test_layers_section")
 
 REPO LANGUAGE MARKER: ${detected_marker:-unknown}
+</user-spec>
 ${frontend_note}
 INSTRUCTIONS:
 For each Scenario, output EXACTLY one line in this markdown table format:
@@ -2661,56 +2731,93 @@ QUES_EOF
 
     # Run agents in pipeline order (using temporary files)
     # Agents will update the spec file in place
+    local checkpoint_file="$temp_dir/.checkpoint"
 
     # Run Spec Enrichment Agent FIRST — expand thin fields before other agents
-    info "Running Spec Enrichment Agent..."
-    local enrich_result=0
-    spec_enrichment_agent "$temp_dir" || enrich_result=$?
-    if [ $enrich_result -eq 0 ]; then
-        success "Spec Enrichment Agent completed"
-    elif [ $enrich_result -eq 2 ]; then
-        warn "Spec too thin for automatic enrichment — needs human input"
+    if ! _should_skip_agent "$checkpoint_file" "spec_enrichment"; then
+        info "Running Spec Enrichment Agent..."
+        local enrich_result=0
+        spec_enrichment_agent "$temp_dir" || enrich_result=$?
+        if [ $enrich_result -eq 0 ]; then
+            success "Spec Enrichment Agent completed"
+        elif [ $enrich_result -eq 2 ]; then
+            warn "Spec too thin for automatic enrichment — needs human input"
+        fi
+        _write_checkpoint "$checkpoint_file" "spec_enrichment"
+        log_structured info "agent completed: spec_enrichment (exit=$enrich_result)"
+    else
+        info "Skipping Spec Enrichment Agent (checkpoint)"
     fi
     echo ""
 
     # Run BA Translator Agent (LLM-powered Gherkin generation)
-    info "Running BA Translator Agent..."
-    if ba_translator_agent "$temp_dir"; then
-        success "BA Translator Agent completed"
+    if ! _should_skip_agent "$checkpoint_file" "ba_translator"; then
+        info "Running BA Translator Agent..."
+        if ba_translator_agent "$temp_dir"; then
+            success "BA Translator Agent completed"
+        else
+            warn "BA Translator Agent could not generate Gherkin (continuing with existing)"
+        fi
+        _write_checkpoint "$checkpoint_file" "ba_translator"
+        log_structured info "agent completed: ba_translator"
     else
-        warn "BA Translator Agent could not generate Gherkin (continuing with existing)"
+        info "Skipping BA Translator Agent (checkpoint)"
     fi
     echo ""
 
     # Run Architecture Compliance Agent
-    info "Running Architecture Compliance Agent..."
-    if architecture_compliance_agent "$temp_dir"; then
-        success "Architecture Compliance Agent completed"
+    if ! _should_skip_agent "$checkpoint_file" "architecture"; then
+        info "Running Architecture Compliance Agent..."
+        if architecture_compliance_agent "$temp_dir"; then
+            success "Architecture Compliance Agent completed"
+        else
+            warn "Architecture Compliance Agent reported issues (continuing to Judge)"
+        fi
+        _write_checkpoint "$checkpoint_file" "architecture"
+        log_structured info "agent completed: architecture"
     else
-        warn "Architecture Compliance Agent reported issues (continuing to Judge)"
+        info "Skipping Architecture Compliance Agent (checkpoint)"
     fi
     echo ""
 
     # Run Lead Developer Agent (code structure guidance)
-    info "Running Lead Developer Agent..."
-    if lead_developer_agent "$temp_dir"; then
-        success "Lead Developer Agent completed"
+    if ! _should_skip_agent "$checkpoint_file" "lead_developer"; then
+        info "Running Lead Developer Agent..."
+        if lead_developer_agent "$temp_dir"; then
+            success "Lead Developer Agent completed"
+        else
+            warn "Lead Developer Agent reported issues (continuing to Judge)"
+        fi
+        _write_checkpoint "$checkpoint_file" "lead_developer"
+        log_structured info "agent completed: lead_developer"
     else
-        warn "Lead Developer Agent reported issues (continuing to Judge)"
+        info "Skipping Lead Developer Agent (checkpoint)"
     fi
     echo ""
 
     # Run Security & Compliance Agent
-    info "Running Security & Compliance Agent..."
-    if security_compliance_agent "$temp_dir"; then
-        success "Security & Compliance Agent completed"
+    if ! _should_skip_agent "$checkpoint_file" "security"; then
+        info "Running Security & Compliance Agent..."
+        if security_compliance_agent "$temp_dir"; then
+            success "Security & Compliance Agent completed"
+        else
+            warn "Security & Compliance Agent reported issues (continuing to Judge)"
+        fi
+        _write_checkpoint "$checkpoint_file" "security"
+        log_structured info "agent completed: security"
     else
-        warn "Security & Compliance Agent reported issues (continuing to Judge)"
+        info "Skipping Security & Compliance Agent (checkpoint)"
     fi
     echo ""
 
     # Run Test Strategy Agent (rule-based + LLM enhancement)
-    test_strategy_agent "$temp_dir"
+    if ! _should_skip_agent "$checkpoint_file" "test_strategy"; then
+        test_strategy_agent "$temp_dir"
+        _write_checkpoint "$checkpoint_file" "test_strategy"
+        log_structured info "agent completed: test_strategy"
+    else
+        info "Skipping Test Strategy Agent (checkpoint)"
+    fi
     echo ""
 
     # Read updated spec back
@@ -2720,6 +2827,7 @@ QUES_EOF
     # Run Judge Agent (capture exit code without triggering set -e)
     local judge_result=0
     judge_agent "$spec_file" "$questions_file" || judge_result=$?
+    log_structured info "agent completed: judge (exit=$judge_result)"
 
     local timestamp
     timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -2745,6 +2853,26 @@ ${questions_content}
         warn "Ticket requires human input"
 
     elif [ $judge_result -eq 0 ]; then
+        # Validate farm33 can consume the spec before marking ready
+        if ! validate_farm33_contract "$updated_spec"; then
+            new_label="state:REFINING"
+            comment_body="## ⚠️ Contract Validation Failed
+
+The spec passed all Definition of Ready criteria, but farm33 contract validation failed.
+The spec is missing parseable fields that farm33 needs to consume it.
+
+**Missing:**
+- Golden commands must have \`Golden build command:\` and \`Golden test command:\` lines
+- Gherkin must have \`Feature:\` and \`Scenario:\` blocks
+- A base ref must be extractable
+
+**Next steps:**
+1. Fix the missing fields in the spec
+2. Run: \`vault67 refine ${issue_number}\`"
+
+            warn "Contract validation failed — spec not consumable by farm33"
+
+        else
         # READY_TO_IMPLEMENT - all criteria met
         new_label="state:READY_TO_IMPLEMENT"
 
@@ -2778,6 +2906,8 @@ ${promptpack_content}
 Run: \`vault67 implement ${issue_number}\`"
 
         success "Ticket is ready for implementation!"
+
+        fi  # end contract validation else
 
     else
         # Not ready - criteria not met but no blocking questions

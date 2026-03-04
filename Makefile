@@ -1,4 +1,4 @@
-.PHONY: test test-vault67 test-farm33 lint lint-vault67 lint-farm33
+.PHONY: test test-vault67 test-farm33 test-integration test-all lint lint-vault67 lint-farm33
 
 test:
 	@bash tests/run_tests.sh
@@ -8,6 +8,12 @@ test-vault67:
 
 test-farm33:
 	@bats tests/farm33/
+
+test-integration:
+	@echo "Running integration tests..."
+	@bats tests/vault67/test_judge_integration.bats tests/farm33/test_refinement_integration.bats
+
+test-all: test test-integration
 
 lint:
 	@echo "Linting vault67..."

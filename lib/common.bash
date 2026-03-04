@@ -80,14 +80,36 @@ print(json.dumps({
         return 1
     fi
 
+    local _ollama_target_url="${OLLAMA_URL}"
     local http_code
     http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$timeout" \
-        -X POST "${OLLAMA_URL}/api/generate" \
+        -X POST "${_ollama_target_url}/api/generate" \
         -H "Content-Type: application/json" \
         -d "$json_payload" \
         -o "$response_file" 2>/dev/null) || {
-        rm -f "$response_file"
-        return 1
+        # Primary failed — try fallback if configured
+        if [ -n "${OLLAMA_FALLBACK_URL:-}" ]; then
+            _ollama_target_url="$OLLAMA_FALLBACK_URL"
+            http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$timeout" \
+                -X POST "${_ollama_target_url}/api/generate" \
+                -H "Content-Type: application/json" \
+                -d "$json_payload" \
+                -o "$response_file" 2>/dev/null) || {
+                rm -f "$response_file"
+                if [ "${LLM_OPTIONAL:-0}" = "1" ]; then
+                    echo ""
+                    return 0
+                fi
+                return 1
+            }
+        else
+            rm -f "$response_file"
+            if [ "${LLM_OPTIONAL:-0}" = "1" ]; then
+                echo ""
+                return 0
+            fi
+            return 1
+        fi
     }
 
     if [[ "$http_code" != "200" ]]; then
@@ -99,7 +121,7 @@ print(json.dumps({
                 rm -f "$response_file"
                 # Retry the request
                 http_code=$(curl -s -w "%{http_code}" --connect-timeout 10 --max-time "$timeout" \
-                    -X POST "${OLLAMA_URL}/api/generate" \
+                    -X POST "${_ollama_target_url}/api/generate" \
                     -H "Content-Type: application/json" \
                     -d "$json_payload" \
                     -o "$response_file" 2>/dev/null) || {
