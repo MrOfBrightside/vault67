@@ -1010,9 +1010,9 @@ generate_promptpack() {
 
     # Extract golden commands
     local golden_build
-    golden_build=$(echo "$test_strategy" | grep "- Golden build command:" | sed 's/- Golden build command:\s*//')
+    golden_build=$(echo "$test_strategy" | grep -e "- Golden build command:" | sed 's/- Golden build command:\s*//' || true)
     local golden_test
-    golden_test=$(echo "$test_strategy" | grep "- Golden test command:" | sed 's/- Golden test command:\s*//')
+    golden_test=$(echo "$test_strategy" | grep -e "- Golden test command:" | sed 's/- Golden test command:\s*//' || true)
 
     # Write promptpack.md
     cat > "$promptpack_file" <<EOF
@@ -1094,11 +1094,7 @@ architecture_compliance_agent() {
         return 0
     fi
 
-    # Helper to read a section from a markdown file
-    _read_md_section() {
-        local section="$1" file="$2"
-        awk "/^## ${section}\$/{found=1;next} /^## /{if(found)exit} found && !/^#/ && !/^[[:space:]]*\$/{print}" "$file" 2>/dev/null
-    }
+    # _read_md_section is provided by lib/helpers.bash
 
     # Get repo path
     local repo_path
@@ -1331,11 +1327,7 @@ lead_developer_agent() {
         return 0
     fi
 
-    # Helper to read a section from a markdown file
-    _read_ld_section() {
-        local section="$1" file="$2"
-        awk "/^## ${section}\$/{found=1;next} /^## /{if(found)exit} found && !/^#/ && !/^[[:space:]]*\$/{print}" "$file" 2>/dev/null
-    }
+    # _read_md_section is provided by lib/helpers.bash (replaces _read_md_section)
 
     # Get repo path
     local repo_path
@@ -1352,7 +1344,7 @@ lead_developer_agent() {
     local monolith_threshold=500
     if [ -f "$rules_file" ]; then
         local _thresh
-        _thresh=$(_read_ld_section "Monolith detection" "$rules_file" | grep "threshold:" | sed 's/.*threshold:[[:space:]]*//')
+        _thresh=$(_read_md_section "Monolith detection" "$rules_file" | grep "threshold:" | sed 's/.*threshold:[[:space:]]*//')
         [ -n "$_thresh" ] && monolith_threshold="$_thresh"
     fi
 
@@ -1472,7 +1464,7 @@ lead_developer_agent() {
     local project_notes=""
     if [ -n "$project_config" ]; then
         info "Found project code structure config: ${project_config}"
-        project_notes=$(_read_ld_section "Notes" "$project_config")
+        project_notes=$(_read_md_section "Notes" "$project_config")
     fi
 
     # --- Step 5: Build output ---
@@ -1613,7 +1605,7 @@ security_compliance_agent() {
 
         # Return default
         if [ -n "$default_section" ] && [ -f "$rules_file" ]; then
-            awk "/^## ${default_section}\$/{found=1;next} /^## /{if(found)exit} found&&NF{printf \"%s\",\$0}" "$rules_file"
+            awk -v sect="^## ${default_section}$" '$0 ~ sect {found=1;next} /^## /{if(found)exit} found&&NF{printf "%s",$0}' "$rules_file"
         fi
     }
 
@@ -2699,9 +2691,9 @@ cmd_refine() {
 
     # Create minimal repo_context.md (extract from spec metadata if present)
     local repo_path
-    repo_path=$(echo "$issue_body" | grep "^- Repo:" | sed 's/^- Repo: `\(.*\)`/\1/')
+    repo_path=$(echo "$issue_body" | grep "^- Repo:" | sed 's/^- Repo: `\(.*\)`/\1/' || true)
     local base_ref
-    base_ref=$(echo "$issue_body" | grep "^- Base ref:" | sed 's/^- Base ref: `\(.*\)`/\1/')
+    base_ref=$(echo "$issue_body" | grep "^- Base ref:" | sed 's/^- Base ref: `\(.*\)`/\1/' || true)
     
     cat > "$repo_context_file" <<REPO_EOF
 # Repo Context
@@ -2876,20 +2868,18 @@ The spec is missing parseable fields that farm33 needs to consume it.
         # READY_TO_IMPLEMENT - all criteria met
         new_label="state:READY_TO_IMPLEMENT"
 
-        # Generate promptpack
-        local promptpack_content="# Implementation Prompt Pack
+        # Generate structured promptpack via generate_promptpack()
+        local ticket_file="$temp_dir/ticket.md"
+        cat > "$ticket_file" <<TICKET_EOF
+---
+base_ref: main
+---
+TICKET_EOF
 
-Generated: ${timestamp}
-
-## Spec
-${updated_spec}
-
-## Instructions
-1. Implement changes according to the specification above
-2. Follow all constraints and allowed/forbidden paths
-3. Create tests as defined in test strategy
-4. Create a PR against base ref
-5. Include a brief PR description mapping changes to scenarios"
+        local promptpack_file="$temp_dir/promptpack.md"
+        generate_promptpack "$spec_file" "$ticket_file" "$promptpack_file"
+        local promptpack_content
+        promptpack_content=$(cat "$promptpack_file")
 
         comment_body="## ✅ Ready for Implementation
 
